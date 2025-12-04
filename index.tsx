@@ -8,7 +8,7 @@ import {
 import {
     Plus, Trash2, Syringe, Pill, Droplet, Sticker, X, 
     Settings, ChevronDown, ChevronUp, Save, Clock, Languages, Calendar,
-    Activity, Info, ZoomIn, RotateCcw, Menu, Download, Upload, QrCode, Camera, Image, Copy
+    Activity, Info, ZoomIn, RotateCcw, Menu, Download, Upload, QrCode, Camera, Image as ImageIcon, Copy
 } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
 import jsQR from 'jsqr';
@@ -24,7 +24,7 @@ type Lang = 'zh' | 'en';
 
 const TRANSLATIONS = {
     zh: {
-        "app.title": "HRT 模拟记录",
+        "app.title": "HRT 记录",
         "status.estimate": "当前估算浓度",
         "status.weight": "体重",
         "chart.title": "雌二醇浓度 (pg/mL)",
@@ -51,6 +51,11 @@ const TRANSLATIONS = {
         "drawer.close": "关闭侧栏",
         "drawer.qr": "二维码导入导出",
         "drawer.qr_hint": "通过二维码快速分享或恢复剂量记录。",
+        "import.title": "导入数据",
+        "import.text": "粘贴 JSON 文本",
+        "import.paste_hint": "在此处粘贴 JSON 内容...",
+        "import.file": "选择 JSON 文件",
+        "import.file_btn": "选择文件",
         "qr.title": "二维码导入导出",
         "qr.export.title": "导出剂量到二维码",
         "qr.export.empty": "当前没有可导出的剂量记录。",
@@ -62,6 +67,7 @@ const TRANSLATIONS = {
         "qr.import.scan": "开启摄像头扫描",
         "qr.import.stop": "停止扫描",
         "qr.scan.hint": "请将二维码置于取景框中央。",
+        "qr.scan.active": "摄像头已开启，请对准二维码。",
         "qr.upload.hint": "支持 PNG/JPEG 等常见格式。",
         "qr.error.camera": "无法访问摄像头。",
         "qr.error.decode": "未检测到有效二维码。",
@@ -137,6 +143,11 @@ const TRANSLATIONS = {
         "drawer.close": "Close Panel",
         "drawer.qr": "QR Import/Export",
         "drawer.qr_hint": "Share or restore your dosages via QR code.",
+        "import.title": "Import Data",
+        "import.text": "Paste JSON Text",
+        "import.paste_hint": "Paste JSON content here...",
+        "import.file": "Select JSON File",
+        "import.file_btn": "Choose File",
         "qr.title": "QR Import & Export",
         "qr.export.title": "Export doses to QR",
         "qr.export.empty": "Add at least one dose to generate a QR code.",
@@ -148,6 +159,7 @@ const TRANSLATIONS = {
         "qr.import.scan": "Start camera scan",
         "qr.import.stop": "Stop scanning",
         "qr.scan.hint": "Align the QR code inside the frame.",
+        "qr.scan.active": "Camera live. Point the QR into the frame.",
         "qr.upload.hint": "PNG/JPEG screenshots are supported.",
         "qr.error.camera": "Camera access failed.",
         "qr.error.decode": "No valid QR detected.",
@@ -210,7 +222,7 @@ const LanguageProvider = ({ children }: { children: React.ReactNode }) => {
 
     useEffect(() => {
         localStorage.setItem('hrt-lang', lang);
-        document.title = lang === 'zh' ? "HRT 模拟记录" : "HRT Recorder";
+        document.title = lang === 'zh' ? "HRT 记录" : "HRT Recorder";
     }, [lang]);
 
     const t = (key: string) => {
@@ -706,40 +718,106 @@ const DoseFormModal = ({ isOpen, onClose, eventToEdit, onSave }: any) => {
     );
 };
 
+const ImportModal = ({ isOpen, onClose, onImportJson }: { isOpen: boolean; onClose: () => void; onImportJson: (text: string) => boolean }) => {
+    const { t } = useTranslation();
+    const [text, setText] = useState("");
+    const fileInputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => {
+        if (isOpen) setText("");
+    }, [isOpen]);
+
+    const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+            const content = reader.result as string;
+            if (onImportJson(content)) {
+                onClose();
+            }
+        };
+        reader.readAsText(file);
+        e.target.value = "";
+    };
+
+    const handleTextImport = () => {
+        if (onImportJson(text)) {
+            onClose();
+        }
+    };
+
+    if (!isOpen) return null;
+
+    return (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-6 transform transition-all scale-100 flex flex-col gap-4">
+                <div className="flex justify-between items-center border-b border-gray-100 pb-4">
+                    <h3 className="text-xl font-bold text-gray-900">{t('import.title')}</h3>
+                    <button onClick={onClose} className="p-2 bg-gray-100 rounded-full hover:bg-gray-200 transition">
+                        <X size={20} className="text-gray-500" />
+                    </button>
+                </div>
+
+                <div className="space-y-4">
+                    <div>
+                        <label className="block text-sm font-bold text-gray-700 mb-2">{t('import.text')}</label>
+                        <textarea
+                            className="w-full h-32 p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-pink-300 outline-none font-mono text-xs"
+                            placeholder={t('import.paste_hint')}
+                            value={text}
+                            onChange={e => setText(e.target.value)}
+                        />
+                        <button
+                            onClick={handleTextImport}
+                            disabled={!text.trim()}
+                            className="mt-2 w-full py-3 bg-gray-900 text-white font-bold rounded-xl hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                        >
+                            {t('drawer.import')}
+                        </button>
+                    </div>
+
+                    <div className="relative flex py-2 items-center">
+                        <div className="flex-grow border-t border-gray-200"></div>
+                        <span className="flex-shrink-0 mx-4 text-gray-400 text-xs uppercase font-bold">OR</span>
+                        <div className="flex-grow border-t border-gray-200"></div>
+                    </div>
+
+                    <div>
+                        <label className="block text-sm font-bold text-gray-700 mb-2">{t('import.file')}</label>
+                        <button
+                            onClick={() => fileInputRef.current?.click()}
+                            className="w-full py-3 border-2 border-dashed border-gray-300 text-gray-500 font-bold rounded-xl hover:border-pink-300 hover:bg-pink-50 hover:text-pink-500 transition flex items-center justify-center gap-2"
+                        >
+                            <Upload size={20} />
+                            {t('import.file_btn')}
+                        </button>
+                        <input
+                            ref={fileInputRef}
+                            type="file"
+                            accept="application/json"
+                            className="hidden"
+                            onChange={handleFileChange}
+                        />
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
 const QRCodeModal = ({ isOpen, onClose, events, onImportJson }: { isOpen: boolean; onClose: () => void; events: DoseEvent[]; onImportJson: (payload: string) => boolean; }) => {
     const { t } = useTranslation();
     const dataString = useMemo(() => events.length ? JSON.stringify(events) : '', [events]);
     const [copyState, setCopyState] = useState<'idle' | 'copied'>('idle');
     const [errorMsg, setErrorMsg] = useState('');
-    const [statusMsg, setStatusMsg] = useState('');
-    const [isScanning, setIsScanning] = useState(false);
-    const videoRef = useRef<HTMLVideoElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
-    const rafRef = useRef<number | null>(null);
-    const streamRef = useRef<MediaStream | null>(null);
-
-    const stopScan = useCallback(() => {
-        if (rafRef.current) {
-            cancelAnimationFrame(rafRef.current);
-            rafRef.current = null;
-        }
-        if (streamRef.current) {
-            streamRef.current.getTracks().forEach(track => track.stop());
-            streamRef.current = null;
-        }
-        if (videoRef.current) {
-            videoRef.current.srcObject = null;
-        }
-        setIsScanning(false);
-    }, []);
 
     useEffect(() => {
         if (!isOpen) {
-            stopScan();
             setErrorMsg('');
-            setStatusMsg('');
         }
-    }, [isOpen, stopScan]);
+    }, [isOpen]);
 
     const handleDecoded = useCallback((text: string) => {
         if (!text) {
@@ -748,65 +826,12 @@ const QRCodeModal = ({ isOpen, onClose, events, onImportJson }: { isOpen: boolea
         }
         const ok = onImportJson(text);
         if (ok) {
-            stopScan();
             setErrorMsg('');
-            setStatusMsg('');
             onClose();
         } else {
             setErrorMsg(t('qr.error.format'));
         }
-    }, [onImportJson, stopScan, onClose, t]);
-
-    const scanFrame = useCallback(() => {
-        if (!videoRef.current || !canvasRef.current) {
-            rafRef.current = requestAnimationFrame(scanFrame);
-            return;
-        }
-        const video = videoRef.current;
-        if (video.readyState !== video.HAVE_ENOUGH_DATA) {
-            rafRef.current = requestAnimationFrame(scanFrame);
-            return;
-        }
-        const canvas = canvasRef.current;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-            rafRef.current = requestAnimationFrame(scanFrame);
-            return;
-        }
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const code = jsQR(imageData.data, canvas.width, canvas.height);
-        if (code?.data) {
-            handleDecoded(code.data);
-        } else {
-            rafRef.current = requestAnimationFrame(scanFrame);
-        }
-    }, [handleDecoded]);
-
-    const startScan = async () => {
-        if (isScanning) return;
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            setErrorMsg(t('qr.error.camera'));
-            return;
-        }
-        setErrorMsg('');
-        setStatusMsg(t('qr.scan.hint'));
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-            if (videoRef.current) {
-                videoRef.current.srcObject = stream;
-                await videoRef.current.play();
-            }
-            streamRef.current = stream;
-            setIsScanning(true);
-            rafRef.current = requestAnimationFrame(scanFrame);
-        } catch (err) {
-            console.error(err);
-            setErrorMsg(t('qr.error.camera'));
-        }
-    };
+    }, [onImportJson, onClose, t]);
 
     const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -814,7 +839,7 @@ const QRCodeModal = ({ isOpen, onClose, events, onImportJson }: { isOpen: boolea
         setErrorMsg('');
         const reader = new FileReader();
         reader.onload = () => {
-            const img = new Image();
+            const img = new window.Image();
             img.onload = () => {
                 const canvas = canvasRef.current;
                 const ctx = canvas?.getContext('2d');
@@ -859,7 +884,7 @@ const QRCodeModal = ({ isOpen, onClose, events, onImportJson }: { isOpen: boolea
                         <p className="text-xs font-semibold text-pink-400 uppercase tracking-wider">{t('qr.title')}</p>
                         <p className="text-sm text-gray-500 mt-1">{t('qr.help')}</p>
                     </div>
-                    <button onClick={() => { stopScan(); onClose(); }} className="p-2 rounded-full bg-gray-100 text-gray-500 hover:bg-gray-200">
+                    <button onClick={onClose} className="p-2 rounded-full bg-gray-100 text-gray-500 hover:bg-gray-200">
                         <X size={18} />
                     </button>
                 </div>
@@ -898,29 +923,10 @@ const QRCodeModal = ({ isOpen, onClose, events, onImportJson }: { isOpen: boolea
                             <Camera size={16} className="text-teal-500" />
                             {t('qr.import.title')}
                         </div>
-                        <div className="space-y-3">
-                            <div className="relative">
-                                {isScanning ? (
-                                    <video ref={videoRef} className="w-full h-48 rounded-2xl object-cover bg-black/70" playsInline muted autoPlay />
-                                ) : (
-                                    <div className="w-full h-48 rounded-2xl bg-black/5 border border-dashed border-gray-300 flex flex-col items-center justify-center text-gray-400 text-sm">
-                                        <QrCode size={32} className="mb-2" />
-                                        <p className="px-4 text-center text-xs">{t('qr.scan.hint')}</p>
-                                    </div>
-                                )}
-                                <button
-                                    onClick={isScanning ? stopScan : startScan}
-                                    className={`absolute right-3 top-3 px-3 py-1.5 rounded-full text-xs font-bold ${isScanning ? 'bg-white text-gray-700' : 'bg-gray-900 text-white'}`}
-                                >
-                                    {isScanning ? t('qr.import.stop') : t('qr.import.scan')}
-                                </button>
-                            </div>
-                            <p className="text-xs text-gray-500">{statusMsg || t('qr.scan.hint')}</p>
-                        </div>
-
+                        
                         <div className="space-y-2">
                             <label className="flex items-center gap-2 text-sm font-semibold text-gray-700">
-                                <Image size={16} className="text-blue-500" />
+                                <ImageIcon size={16} className="text-blue-500" />
                                 {t('qr.import.file')}
                             </label>
                             <input type="file" accept="image/png,image/jpeg,image/webp" onChange={handleImageUpload} className="w-full text-sm text-gray-600" />
@@ -1274,7 +1280,7 @@ const AppContent = () => {
     const [editingEvent, setEditingEvent] = useState<DoseEvent | null>(null);
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
     const [isQrModalOpen, setIsQrModalOpen] = useState(false);
-    const fileInputRef = useRef<HTMLInputElement>(null);
+    const [isImportModalOpen, setIsImportModalOpen] = useState(false);
 
     useEffect(() => { localStorage.setItem('hrt-events', JSON.stringify(events)); }, [events]);
     useEffect(() => { localStorage.setItem('hrt-weight', weight.toString()); }, [weight]);
@@ -1396,23 +1402,6 @@ const AppContent = () => {
         link.download = `hrt-dosages-${timestamp}.json`;
         link.click();
         URL.revokeObjectURL(url);
-    };
-
-    const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0];
-        if (!file) return;
-        const reader = new FileReader();
-        reader.onload = () => {
-            const text = reader.result as string;
-            const ok = importEventsFromJson(text);
-            if (ok) setIsDrawerOpen(false);
-        };
-        reader.readAsText(file);
-        e.target.value = "";
-    };
-
-    const triggerImport = () => {
-        fileInputRef.current?.click();
     };
 
     const dimmedStyle: React.CSSProperties | undefined = isDrawerOpen ? { filter: 'grayscale(0.8)', opacity: 0.45 } : undefined;
@@ -1570,12 +1559,14 @@ const AppContent = () => {
                 onImportJson={(payload) => importEventsFromJson(payload)}
             />
 
-            <input
-                ref={fileInputRef}
-                type="file"
-                accept="application/json"
-                className="hidden"
-                onChange={handleImportFile}
+            <ImportModal
+                isOpen={isImportModalOpen}
+                onClose={() => setIsImportModalOpen(false)}
+                onImportJson={(payload) => {
+                    const ok = importEventsFromJson(payload);
+                    if (ok) setIsDrawerOpen(false);
+                    return ok;
+                }}
             />
 
             <div
@@ -1615,7 +1606,7 @@ const AppContent = () => {
                     </button>
 
                     <button
-                        onClick={triggerImport}
+                        onClick={() => setIsImportModalOpen(true)}
                         className="w-full flex items-center gap-3 p-4 rounded-2xl border border-gray-200 hover:border-teal-200 hover:bg-teal-50 transition"
                     >
                         <Upload className="text-teal-500" size={20} />
