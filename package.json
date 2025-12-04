@@ -14,7 +14,9 @@
     "prop-types": "15.8.1",
     "uuid": "9.0.1",
     "lucide-react": "0.344.0",
-    "recharts": "2.12.7"
+    "recharts": "2.12.7",
+    "qrcode.react": "^4.1.0",
+    "jsqr": "1.4.0"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

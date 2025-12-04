@@ -1,15 +1,17 @@
 
-import React, { useState, useEffect, useMemo, createContext, useContext, useRef } from 'react';
+import React, { useState, useEffect, useMemo, createContext, useContext, useRef, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
 import { v4 as uuidv4 } from 'uuid';
 import {
     LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, Area, ComposedChart
 } from 'recharts';
-import { 
+import {
     Plus, Trash2, Syringe, Pill, Droplet, Sticker, X, 
     Settings, ChevronDown, ChevronUp, Save, Clock, Languages, Calendar,
-    Activity, Info, ZoomIn, RotateCcw, Menu, Download, Upload
+    Activity, Info, ZoomIn, RotateCcw, Menu, Download, Upload, QrCode, Camera, Image, Copy
 } from 'lucide-react';
+import { QRCodeCanvas } from 'qrcode.react';
+import jsQR from 'jsqr';
 import {
     DoseEvent, Route, Ester, ExtraKey, SimulationResult,
     runSimulation, interpolateConcentration, getToE2Factor, EsterInfo, SublingualTierParams, CorePK, SL_TIER_ORDER,
@@ -47,6 +49,24 @@ const TRANSLATIONS = {
         "drawer.import_error": "导入失败，请确认文件内容有效。",
         "drawer.import_success": "导入成功，已更新剂量记录。",
         "drawer.close": "关闭侧栏",
+        "drawer.qr": "二维码导入导出",
+        "drawer.qr_hint": "通过二维码快速分享或恢复剂量记录。",
+        "qr.title": "二维码导入导出",
+        "qr.export.title": "导出剂量到二维码",
+        "qr.export.empty": "当前没有可导出的剂量记录。",
+        "qr.copy": "复制 JSON",
+        "qr.copied": "已复制",
+        "qr.copy_hint": "也可以直接复制 JSON 文本进行分享。",
+        "qr.import.title": "二维码导入",
+        "qr.import.file": "上传二维码图片",
+        "qr.import.scan": "开启摄像头扫描",
+        "qr.import.stop": "停止扫描",
+        "qr.scan.hint": "请将二维码置于取景框中央。",
+        "qr.upload.hint": "支持 PNG/JPEG 等常见格式。",
+        "qr.error.camera": "无法访问摄像头。",
+        "qr.error.decode": "未检测到有效二维码。",
+        "qr.error.format": "二维码内容无效。",
+        "qr.help": "二维码中包含剂量 JSON，请谨慎分享。",
         "error.nonPositive": "不能输入小于等于0的值",
         
         "btn.add": "新增给药",
@@ -115,6 +135,24 @@ const TRANSLATIONS = {
         "drawer.import_error": "Import failed. Please check that the file is valid.",
         "drawer.import_success": "Imported dosages successfully.",
         "drawer.close": "Close Panel",
+        "drawer.qr": "QR Import/Export",
+        "drawer.qr_hint": "Share or restore your dosages via QR code.",
+        "qr.title": "QR Import & Export",
+        "qr.export.title": "Export doses to QR",
+        "qr.export.empty": "Add at least one dose to generate a QR code.",
+        "qr.copy": "Copy JSON",
+        "qr.copied": "Copied",
+        "qr.copy_hint": "You can also share the raw JSON text.",
+        "qr.import.title": "Import from QR",
+        "qr.import.file": "Upload QR image",
+        "qr.import.scan": "Start camera scan",
+        "qr.import.stop": "Stop scanning",
+        "qr.scan.hint": "Align the QR code inside the frame.",
+        "qr.upload.hint": "PNG/JPEG screenshots are supported.",
+        "qr.error.camera": "Camera access failed.",
+        "qr.error.decode": "No valid QR detected.",
+        "qr.error.format": "QR payload is invalid.",
+        "qr.help": "QR payload contains your dosage JSON. Share carefully.",
         "error.nonPositive": "Value must be greater than zero.",
 
         "btn.add": "Add Dose",
@@ -668,6 +706,237 @@ const DoseFormModal = ({ isOpen, onClose, eventToEdit, onSave }: any) => {
     );
 };
 
+const QRCodeModal = ({ isOpen, onClose, events, onImportJson }: { isOpen: boolean; onClose: () => void; events: DoseEvent[]; onImportJson: (payload: string) => boolean; }) => {
+    const { t } = useTranslation();
+    const dataString = useMemo(() => events.length ? JSON.stringify(events) : '', [events]);
+    const [copyState, setCopyState] = useState<'idle' | 'copied'>('idle');
+    const [errorMsg, setErrorMsg] = useState('');
+    const [statusMsg, setStatusMsg] = useState('');
+    const [isScanning, setIsScanning] = useState(false);
+    const videoRef = useRef<HTMLVideoElement>(null);
+    const canvasRef = useRef<HTMLCanvasElement>(null);
+    const rafRef = useRef<number | null>(null);
+    const streamRef = useRef<MediaStream | null>(null);
+
+    const stopScan = useCallback(() => {
+        if (rafRef.current) {
+            cancelAnimationFrame(rafRef.current);
+            rafRef.current = null;
+        }
+        if (streamRef.current) {
+            streamRef.current.getTracks().forEach(track => track.stop());
+            streamRef.current = null;
+        }
+        if (videoRef.current) {
+            videoRef.current.srcObject = null;
+        }
+        setIsScanning(false);
+    }, []);
+
+    useEffect(() => {
+        if (!isOpen) {
+            stopScan();
+            setErrorMsg('');
+            setStatusMsg('');
+        }
+    }, [isOpen, stopScan]);
+
+    const handleDecoded = useCallback((text: string) => {
+        if (!text) {
+            setErrorMsg(t('qr.error.format'));
+            return;
+        }
+        const ok = onImportJson(text);
+        if (ok) {
+            stopScan();
+            setErrorMsg('');
+            setStatusMsg('');
+            onClose();
+        } else {
+            setErrorMsg(t('qr.error.format'));
+        }
+    }, [onImportJson, stopScan, onClose, t]);
+
+    const scanFrame = useCallback(() => {
+        if (!videoRef.current || !canvasRef.current) {
+            rafRef.current = requestAnimationFrame(scanFrame);
+            return;
+        }
+        const video = videoRef.current;
+        if (video.readyState !== video.HAVE_ENOUGH_DATA) {
+            rafRef.current = requestAnimationFrame(scanFrame);
+            return;
+        }
+        const canvas = canvasRef.current;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+            rafRef.current = requestAnimationFrame(scanFrame);
+            return;
+        }
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = jsQR(imageData.data, canvas.width, canvas.height);
+        if (code?.data) {
+            handleDecoded(code.data);
+        } else {
+            rafRef.current = requestAnimationFrame(scanFrame);
+        }
+    }, [handleDecoded]);
+
+    const startScan = async () => {
+        if (isScanning) return;
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            setErrorMsg(t('qr.error.camera'));
+            return;
+        }
+        setErrorMsg('');
+        setStatusMsg(t('qr.scan.hint'));
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+            if (videoRef.current) {
+                videoRef.current.srcObject = stream;
+                await videoRef.current.play();
+            }
+            streamRef.current = stream;
+            setIsScanning(true);
+            rafRef.current = requestAnimationFrame(scanFrame);
+        } catch (err) {
+            console.error(err);
+            setErrorMsg(t('qr.error.camera'));
+        }
+    };
+
+    const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        setErrorMsg('');
+        const reader = new FileReader();
+        reader.onload = () => {
+            const img = new Image();
+            img.onload = () => {
+                const canvas = canvasRef.current;
+                const ctx = canvas?.getContext('2d');
+                if (!canvas || !ctx) return;
+                canvas.width = img.width;
+                canvas.height = img.height;
+                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                const code = jsQR(imageData.data, canvas.width, canvas.height);
+                if (code?.data) {
+                    handleDecoded(code.data);
+                } else {
+                    setErrorMsg(t('qr.error.decode'));
+                }
+            };
+            img.onerror = () => setErrorMsg(t('qr.error.decode'));
+            img.src = reader.result as string;
+        };
+        reader.readAsDataURL(file);
+        e.target.value = "";
+    };
+
+    const handleCopy = async () => {
+        if (!dataString) return;
+        try {
+            await navigator.clipboard.writeText(dataString);
+            setCopyState('copied');
+            setTimeout(() => setCopyState('idle'), 2000);
+        } catch (err) {
+            console.error(err);
+            setErrorMsg(t('qr.error.format'));
+        }
+    };
+
+    if (!isOpen) return null;
+
+    return (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+                <div className="flex items-center justify-between p-6 border-b border-gray-100">
+                    <div>
+                        <p className="text-xs font-semibold text-pink-400 uppercase tracking-wider">{t('qr.title')}</p>
+                        <p className="text-sm text-gray-500 mt-1">{t('qr.help')}</p>
+                    </div>
+                    <button onClick={() => { stopScan(); onClose(); }} className="p-2 rounded-full bg-gray-100 text-gray-500 hover:bg-gray-200">
+                        <X size={18} />
+                    </button>
+                </div>
+
+                <div className="grid md:grid-cols-2 gap-6 p-6">
+                    <section className="p-4 bg-gray-50 rounded-2xl border border-gray-100 space-y-4">
+                        <div className="flex items-center gap-2 text-sm font-bold text-gray-700">
+                            <QrCode size={16} className="text-pink-400" />
+                            {t('qr.export.title')}
+                        </div>
+                        {dataString ? (
+                            <div className="flex flex-col items-center gap-3">
+                                <div className="bg-white p-4 rounded-2xl shadow-sm">
+                                    <QRCodeCanvas value={dataString} size={200} includeMargin level="M" />
+                                </div>
+                                <textarea
+                                    className="w-full h-28 text-xs p-3 rounded-xl border border-gray-200 bg-white font-mono text-gray-600"
+                                    readOnly
+                                    value={dataString}
+                                />
+                                <button
+                                    onClick={handleCopy}
+                                    className="w-full flex items-center justify-center gap-2 py-2 rounded-xl bg-gray-900 text-white text-sm font-semibold hover:bg-gray-800"
+                                >
+                                    <Copy size={16} /> {copyState === 'copied' ? t('qr.copied') : t('qr.copy')}
+                                </button>
+                                <p className="text-xs text-gray-500 text-center">{t('qr.copy_hint')}</p>
+                            </div>
+                        ) : (
+                            <p className="text-sm text-gray-500">{t('qr.export.empty')}</p>
+                        )}
+                    </section>
+
+                    <section className="p-4 bg-gray-50 rounded-2xl border border-gray-100 space-y-4">
+                        <div className="flex items-center gap-2 text-sm font-bold text-gray-700">
+                            <Camera size={16} className="text-teal-500" />
+                            {t('qr.import.title')}
+                        </div>
+                        <div className="space-y-3">
+                            <div className="relative">
+                                {isScanning ? (
+                                    <video ref={videoRef} className="w-full h-48 rounded-2xl object-cover bg-black/70" playsInline muted autoPlay />
+                                ) : (
+                                    <div className="w-full h-48 rounded-2xl bg-black/5 border border-dashed border-gray-300 flex flex-col items-center justify-center text-gray-400 text-sm">
+                                        <QrCode size={32} className="mb-2" />
+                                        <p className="px-4 text-center text-xs">{t('qr.scan.hint')}</p>
+                                    </div>
+                                )}
+                                <button
+                                    onClick={isScanning ? stopScan : startScan}
+                                    className={`absolute right-3 top-3 px-3 py-1.5 rounded-full text-xs font-bold ${isScanning ? 'bg-white text-gray-700' : 'bg-gray-900 text-white'}`}
+                                >
+                                    {isScanning ? t('qr.import.stop') : t('qr.import.scan')}
+                                </button>
+                            </div>
+                            <p className="text-xs text-gray-500">{statusMsg || t('qr.scan.hint')}</p>
+                        </div>
+
+                        <div className="space-y-2">
+                            <label className="flex items-center gap-2 text-sm font-semibold text-gray-700">
+                                <Image size={16} className="text-blue-500" />
+                                {t('qr.import.file')}
+                            </label>
+                            <input type="file" accept="image/png,image/jpeg,image/webp" onChange={handleImageUpload} className="w-full text-sm text-gray-600" />
+                            <p className="text-xs text-gray-500">{t('qr.upload.hint')}</p>
+                        </div>
+
+                        {errorMsg && <p className="text-xs text-red-500">{errorMsg}</p>}
+                    </section>
+                </div>
+
+                <canvas ref={canvasRef} className="hidden" />
+            </div>
+        </div>
+    );
+};
+
 const ResultChart = ({ sim }: { sim: SimulationResult | null }) => {
     const { t, lang } = useTranslation();
     const containerRef = useRef<HTMLDivElement>(null);
@@ -686,12 +955,37 @@ const ResultChart = ({ sim }: { sim: SimulationResult | null }) => {
         }));
     }, [sim]);
 
+    const [anchorNow] = useState(() => new Date().getTime());
+
+    const defaultDomain = useMemo(() => {
+        if (data.length === 0) return null;
+        const min = data[0].time;
+        const max = data[data.length - 1].time;
+        const range = Math.max(max - min, 1);
+        const desiredWidth = range / 2; // 2x zoom => show half of the timeline
+        const minWidth = 24 * 3600 * 1000; // at least 1 day window
+        const width = Math.min(Math.max(desiredWidth, minWidth), range);
+        let start = anchorNow - width / 2;
+        let end = anchorNow + width / 2;
+
+        if (start < min) {
+            start = min;
+            end = Math.min(min + width, max);
+        }
+        if (end > max) {
+            end = max;
+            start = Math.max(max - width, min);
+        }
+
+        return [start, end] as [number, number];
+    }, [data, anchorNow]);
+
     // Update domain when data loads, only if not zoomed
     useEffect(() => {
-        if (data.length > 0 && !isZoomed) {
-            setXDomain([data[0].time, data[data.length - 1].time]);
+        if (!isZoomed && defaultDomain) {
+            setXDomain(defaultDomain);
         }
-    }, [data, isZoomed]);
+    }, [defaultDomain, isZoomed]);
 
     // Setup event listeners for the container to handle wheel/touch events passively/actively
     useEffect(() => {
@@ -831,8 +1125,8 @@ const ResultChart = ({ sim }: { sim: SimulationResult | null }) => {
     };
 
     const resetZoom = () => {
-        if (data.length > 0) {
-            setXDomain([data[0].time, data[data.length - 1].time]);
+        if (defaultDomain) {
+            setXDomain(defaultDomain);
             setIsZoomed(false);
         }
     };
@@ -840,12 +1134,13 @@ const ResultChart = ({ sim }: { sim: SimulationResult | null }) => {
     // Compute total timeline and slider parameters for panning
     const totalMin = data.length > 0 ? data[0].time : 0;
     const totalMax = data.length > 0 ? data[data.length - 1].time : totalMin;
-    // Default visible width when not zoomed: 25% of full range or full range if small
-    const defaultVisibleWidth = Math.max((totalMax - totalMin) * 0.25, totalMax - totalMin);
-    const visibleWidth = xDomain ? (xDomain[1] - xDomain[0]) : Math.min(defaultVisibleWidth, totalMax - totalMin || 1);
+    const defaultVisibleWidth = defaultDomain ? (defaultDomain[1] - defaultDomain[0]) : (totalMax - totalMin);
+    const visibleWidth = xDomain
+        ? (xDomain[1] - xDomain[0])
+        : (defaultVisibleWidth || totalMax - totalMin || 1);
     const sliderMin = totalMin;
     const sliderMax = Math.max(totalMax - visibleWidth, sliderMin);
-    const sliderValue = xDomain ? xDomain[0] : sliderMin;
+    const sliderValue = xDomain ? xDomain[0] : (defaultDomain ? defaultDomain[0] : sliderMin);
 
     const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const v = Number(e.target.value);
@@ -978,6 +1273,7 @@ const AppContent = () => {
     const [isFormOpen, setIsFormOpen] = useState(false);
     const [editingEvent, setEditingEvent] = useState<DoseEvent | null>(null);
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+    const [isQrModalOpen, setIsQrModalOpen] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     useEffect(() => { localStorage.setItem('hrt-events', JSON.stringify(events)); }, [events]);
@@ -1013,6 +1309,45 @@ const AppContent = () => {
         });
         return groups;
     }, [events, lang]);
+
+    const sanitizeImportedEvents = (raw: any): DoseEvent[] => {
+        if (!Array.isArray(raw)) throw new Error('Invalid format');
+        return raw
+            .map((item: any) => {
+                if (!item || typeof item !== 'object') return null;
+                const { route, timeH, doseMG, ester, extras } = item;
+                if (!Object.values(Route).includes(route)) return null;
+                const timeNum = Number(timeH);
+                if (!Number.isFinite(timeNum)) return null;
+                const doseNum = Number(doseMG);
+                const validEster = Object.values(Ester).includes(ester) ? ester : Ester.E2;
+                const sanitizedExtras = (extras && typeof extras === 'object') ? extras : {};
+                return {
+                    id: typeof item.id === 'string' ? item.id : uuidv4(),
+                    route,
+                    timeH: timeNum,
+                    doseMG: Number.isFinite(doseNum) ? doseNum : 0,
+                    ester: validEster,
+                    extras: sanitizedExtras
+                } as DoseEvent;
+            })
+            .filter((item): item is DoseEvent => item !== null);
+    };
+
+    const importEventsFromJson = (text: string): boolean => {
+        try {
+            const parsed = JSON.parse(text);
+            const sanitized = sanitizeImportedEvents(parsed);
+            if (!sanitized.length) throw new Error('No valid entries');
+            setEvents(sanitized);
+            alert(t('drawer.import_success'));
+            return true;
+        } catch (err) {
+            console.error(err);
+            alert(t('drawer.import_error'));
+            return false;
+        }
+    };
 
     const handleAddEvent = () => {
         setEditingEvent(null);
@@ -1068,39 +1403,9 @@ const AppContent = () => {
         if (!file) return;
         const reader = new FileReader();
         reader.onload = () => {
-            try {
-                const text = reader.result as string;
-                const raw = JSON.parse(text);
-                if (!Array.isArray(raw)) throw new Error('Invalid format');
-                const sanitized: DoseEvent[] = raw
-                    .map((item: any) => {
-                        if (!item || typeof item !== 'object') return null;
-                        const { route, timeH, doseMG, ester, extras } = item;
-                        if (!Object.values(Route).includes(route)) return null;
-                        const timeNum = Number(timeH);
-                        if (!Number.isFinite(timeNum)) return null;
-                        const doseNum = Number(doseMG);
-                        const validEster = Object.values(Ester).includes(ester) ? ester : Ester.E2;
-                        const sanitizedExtras = (extras && typeof extras === 'object') ? extras : {};
-                        return {
-                            id: typeof item.id === 'string' ? item.id : uuidv4(),
-                            route,
-                            timeH: timeNum,
-                            doseMG: Number.isFinite(doseNum) ? doseNum : 0,
-                            ester: validEster,
-                            extras: sanitizedExtras
-                        } as DoseEvent;
-                    })
-                    .filter((item): item is DoseEvent => item !== null);
-
-                if (!sanitized.length) throw new Error('No valid entries');
-                setEvents(sanitized);
-                alert(t('drawer.import_success'));
-                setIsDrawerOpen(false);
-            } catch (err) {
-                console.error(err);
-                alert(t('drawer.import_error'));
-            }
+            const text = reader.result as string;
+            const ok = importEventsFromJson(text);
+            if (ok) setIsDrawerOpen(false);
         };
         reader.readAsText(file);
         e.target.value = "";
@@ -1196,22 +1501,22 @@ const AppContent = () => {
                                                         {formatTime(new Date(ev.timeH * 3600000))}
                                                     </span>
                                                 </div>
-                                                <div className="flex items-center gap-2 text-xs text-gray-500 font-medium">
-                                                     <span className="truncate">{t(`route.${ev.route}`).split('(')[0]}</span>
-                                                     {ev.route !== Route.patchRemove && (
-                                                        <>
-                                                            <span className="text-gray-300">•</span>
-                                                            {ev.extras[ExtraKey.releaseRateUGPerDay] ? (
+                                                <div className="text-xs text-gray-500 font-medium space-y-1">
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="truncate">{t(`route.${ev.route}`).split('(')[0]}</span>
+                                                        {ev.extras[ExtraKey.releaseRateUGPerDay] && (
+                                                            <>
+                                                                <span className="text-gray-300">•</span>
                                                                 <span className="text-gray-700">{`${ev.extras[ExtraKey.releaseRateUGPerDay]} µg/d`}</span>
-                                                            ) : (
-                                                                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-gray-700">
-                                                                    <span>{`${t('timeline.dose_label')}: ${((getRawDoseMG(ev) ?? 0)).toFixed(2)} mg`}</span>
-                                                                    <span className="text-gray-300">•</span>
-                                                                    <span>{`${t('timeline.bio_label')}: ${getBioDoseMG(ev).toFixed(2)} mg`}</span>
-                                                                </div>
-                                                            )}
-                                                        </>
-                                                     )}
+                                                            </>
+                                                        )}
+                                                    </div>
+                                                    {ev.route !== Route.patchRemove && (
+                                                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-gray-700">
+                                                            <span>{`${t('timeline.dose_label')}: ${(getRawDoseMG(ev) ?? 0).toFixed(2)} mg`}</span>
+                                                            <span>{`${t('timeline.bio_label')}: ${getBioDoseMG(ev).toFixed(2)} mg`}</span>
+                                                        </div>
+                                                    )}
                                                 </div>
                                             </div>
                                             
@@ -1256,6 +1561,13 @@ const AppContent = () => {
                 onClose={() => setIsFormOpen(false)}
                 eventToEdit={editingEvent}
                 onSave={handleSaveEvent}
+            />
+
+            <QRCodeModal
+                isOpen={isQrModalOpen}
+                onClose={() => setIsQrModalOpen(false)}
+                events={events}
+                onImportJson={(payload) => importEventsFromJson(payload)}
             />
 
             <input
@@ -1310,6 +1622,17 @@ const AppContent = () => {
                         <div className="text-left">
                             <p className="font-bold text-gray-900 text-sm">{t('drawer.import')}</p>
                             <p className="text-xs text-gray-500">{t('drawer.import_hint')}</p>
+                        </div>
+                    </button>
+
+                    <button
+                        onClick={() => setIsQrModalOpen(true)}
+                        className="w-full flex items-center gap-3 p-4 rounded-2xl border border-gray-200 hover:border-indigo-200 hover:bg-indigo-50 transition"
+                    >
+                        <QrCode className="text-indigo-500" size={20} />
+                        <div className="text-left">
+                            <p className="font-bold text-gray-900 text-sm">{t('drawer.qr')}</p>
+                            <p className="text-xs text-gray-500">{t('drawer.qr_hint')}</p>
                         </div>
                     </button>
 
