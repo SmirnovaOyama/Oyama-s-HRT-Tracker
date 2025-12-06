@@ -9,16 +9,17 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "jsqr": "1.4.0",
+    "lucide-react": "0.344.0",
+    "prop-types": "15.8.1",
+    "qrcode.react": "^4.1.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "prop-types": "15.8.1",
-    "uuid": "9.0.1",
-    "lucide-react": "0.344.0",
     "recharts": "2.12.7",
-    "qrcode.react": "^4.1.0",
-    "jsqr": "1.4.0"
+    "uuid": "9.0.1"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20251205.0",
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.0",
     "typescript": "~5.8.2",
