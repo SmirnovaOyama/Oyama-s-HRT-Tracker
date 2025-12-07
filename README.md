@@ -28,7 +28,7 @@ We strictly adhere to the `PKcore.swift` and `PKparameter.swift` logic provided 
   **隐私优先**：所有数据都完全存储在你浏览器的 `localStorage` 中，绝不会发送到任何服务器。
 
 * **Internationalization**: Native support for **Simplified Chinese** and **English**, **Cantonese**, **Russian, Ukrainian** and more.<br>
-  **双语支持**：原生支持多语言界面。
+  **多语言支持**：原生支持多语言界面。
 
 ## 🧪 Run Locally 本地运行
 
@@ -37,10 +37,10 @@ This project is built with **React** and **TypeScript**. You can run it easily u
 
 1. **Clone or Download** the files.<br>
 
-   1. **Clone 或下载**项目文件到本地。
+   **Clone 或下载**项目文件到本地。
 
 2. **Initialize a Vite project** (if starting from scratch):<br>
-   2. **初始化一个 Vite 项目**（如果你是从零开始）：
+   **初始化一个 Vite 项目**（如果你是从零开始）：
 
    ```bash
    npm create vite@latest hrt-recorder -- --template react-ts
@@ -49,20 +49,20 @@ This project is built with **React** and **TypeScript**. You can run it easily u
    ```
 
 3. **Install Dependencies**:<br>
-   3. **安装依赖**：
+   **安装依赖**：
 
    ```bash
    npm install recharts lucide-react uuid @types/uuid clsx tailwind-merge
    ```
 
 4. **Setup Tailwind CSS**:<br>
-   4. **配置 Tailwind CSS**：
+   **配置 Tailwind CSS**：
 
    Follow the [Tailwind CSS Vite Guide](https://tailwindcss.com/docs/guides/vite) to generate your `tailwind.config.js`.
    请按照 [Tailwind CSS 的 Vite 指南](https://tailwindcss.com/docs/guides/vite) 配置并生成你的 `tailwind.config.js` 文件。
 
 5. **Add Code**:<br>
-   5. **添加代码**：
+   **添加代码**：
 
    * Place `logic.ts` and `index.tsx` into your `src/` folder.<br>
      将 `logic.ts` 与 `index.tsx` 放入你的 `src/` 文件夹中。
@@ -71,7 +71,7 @@ This project is built with **React** and **TypeScript**. You can run it easily u
      如有需要，更新 `index.html` 中的入口配置。
 
 6. **Run**:<br>
-   6. **运行项目**：
+   **运行项目**：
 
    ```bash
    npm run dev
@@ -92,11 +92,11 @@ If you deploy this app publicly, please:<br>
 
 1. **Keep the original algorithm credits**: Visibly link back to the [HRT-Recorder-PKcomponent-Test](https://github.com/LaoZhong-Mihari/HRT-Recorder-PKcomponent-Test) repository.<br>
 
-   1. **保留原始算法的鸣谢信息**：在显眼位置添加指向 [HRT-Recorder-PKcomponent-Test](https://github.com/LaoZhong-Mihari/HRT-Recorder-PKcomponent-Test) 仓库的链接。
+   **保留原始算法的鸣谢信息**：在显眼位置添加指向 [HRT-Recorder-PKcomponent-Test](https://github.com/LaoZhong-Mihari/HRT-Recorder-PKcomponent-Test) 仓库的链接。
 
 2. **Respect the license**: Ensure you follow any licensing terms associated with the original algorithm code.<br>
-   2. **遵守许可协议**：确保你遵循原始算法代码所适用的全部许可条款。
+   **遵守许可协议**：确保你遵循原始算法代码所适用的全部许可条款。
 
 *Happy Estimating!* 🏳️‍⚧️<br>
 *祝你性转顺利、使用愉快！(๑•̀ㅂ•́)و✧* 🏳️‍⚧️<br>
-*祝所有停经期女性身体健康，阖家幸福
+祝所有用此webapp的停经期女性身体健康
