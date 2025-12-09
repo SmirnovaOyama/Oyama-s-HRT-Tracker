@@ -34,7 +34,7 @@
       "targets": [
         "dmg",
         "app",
-        "nsis"
+        "msi"
       ]
     },
     "security": {
