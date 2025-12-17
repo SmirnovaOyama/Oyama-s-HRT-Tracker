@@ -101,6 +101,12 @@ const AppContent = () => {
         return groups;
     }, [events, lang]);
 
+    const navItems = useMemo(() => ([
+        { id: 'home', label: t('nav.home'), icon: <Activity size={16} /> },
+        { id: 'history', label: t('nav.history'), icon: <Calendar size={16} /> },
+        { id: 'settings', label: t('nav.settings'), icon: <Settings size={16} /> },
+    ]), [t]);
+
     const sanitizeImportedEvents = (raw: any): DoseEvent[] => {
         if (!Array.isArray(raw)) throw new Error('Invalid format');
         return raw
@@ -281,52 +287,93 @@ const AppContent = () => {
     return (
         <div className="h-screen w-full bg-white flex flex-col font-sans text-gray-900 select-none overflow-hidden">
             <div className="flex-1 flex flex-col overflow-hidden w-full bg-white shadow-xl shadow-gray-900/10">
+                {/* Top navigation for tablet/desktop */}
+                <div className="hidden md:flex items-center justify-between px-6 py-4 border-b border-gray-100 bg-white sticky top-0 z-20">
+                    <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-xl overflow-hidden border border-gray-200 bg-white">
+                            <img src="/favicon.ico" alt="HRT Recorder logo" className="w-full h-full object-cover" />
+                        </div>
+                        <div className="leading-tight">
+                            <p className="text-base font-black tracking-tight text-gray-900">HRT Recorder</p>
+                        </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                        {navItems.map(item => (
+                            <button
+                                key={item.id}
+                                onClick={() => setCurrentView(item.id as 'home' | 'history' | 'settings')}
+                                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl border text-sm font-semibold transition ${
+                                    currentView === item.id
+                                        ? 'bg-gray-900 text-white border-gray-900'
+                                        : 'bg-white text-gray-700 border-gray-200 hover:border-gray-300 hover:text-gray-900'
+                                }`}
+                            >
+                                {item.icon}
+                                <span>{item.label}</span>
+                            </button>
+                        ))}
+                    </div>
+                    <div className="flex items-center gap-3">
+                        <div className="px-4 py-2.5 rounded-full border border-gray-200 bg-gray-50 text-sm font-bold text-gray-800 flex items-center gap-3">
+                            <span>{formatDate(currentTime, lang)}</span>
+                            <span className="text-gray-300">·</span>
+                            <span className="font-mono text-gray-900">{formatTime(currentTime)}</span>
+                        </div>
+                        <button
+                            onClick={handleAddEvent}
+                            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-gray-900 text-white text-sm font-bold hover:bg-gray-800 transition"
+                        >
+                            <Plus size={16} />
+                            <span>{t('btn.add')}</span>
+                        </button>
+                    </div>
+                </div>
+
                 {/* Header */}
                 {currentView === 'home' && (
-                    <header className="relative px-4 md:px-8 pt-10 pb-6 rounded-b-[2.5rem]">
-                        <div className="relative bg-white border border-gray-100 rounded-3xl shadow-lg shadow-gray-100 px-5 md:px-8 py-6 md:py-8">
-                            <div className="flex justify-between items-start gap-3 mb-4 md:mb-6">
-                                <div>
-                                    <h1 className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-gray-50 text-[11px] md:text-xs font-semibold text-gray-600 tracking-tight border border-gray-100 mb-1">
+                    <header className="relative px-4 md:px-8 pt-6 pb-4">
+                        <div className="grid md:grid-cols-3 gap-3 md:gap-4">
+                            <div className="md:col-span-2 bg-white border border-gray-200 rounded-2xl shadow-sm px-5 py-5 flex items-start justify-between">
+                                <div className="space-y-2">
+                                    <h1 className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-gray-50 text-[11px] md:text-xs font-semibold text-gray-700 border border-gray-200">
+                                        <Activity size={14} className="text-gray-500" />
                                         {t('status.estimate')}
                                     </h1>
                                     <div className="flex items-end gap-2">
-                                        <span className="text-6xl md:text-7xl lg:text-8xl font-black text-gray-900 tracking-tighter">
+                                        <span className="text-6xl md:text-7xl font-black text-gray-900 tracking-tight">
                                             {currentLevel.toFixed(0)}
                                         </span>
-                                        <span className="text-lg md:text-xl lg:text-2xl font-bold text-gray-400">pg/mL</span>
+                                        <span className="text-lg md:text-xl font-bold text-gray-400">pg/mL</span>
                                     </div>
                                 </div>
-                                <div className="text-right text-xs font-medium text-gray-400 leading-tight">
-                                    <div className="px-3 py-1 rounded-full bg-gray-50 text-gray-600 border border-gray-100 inline-flex items-center gap-2">
-                                        <Calendar size={14} className="text-pink-400" />
+                                <div className="text-right text-xs font-semibold text-gray-500 space-y-1 md:hidden">
+                                    <div className="px-3 py-1 rounded-lg bg-gray-50 border border-gray-200 inline-flex items-center gap-2">
+                                        <Calendar size={14} className="text-gray-500" />
                                         <span className="text-xs md:text-sm">{formatDate(currentTime, lang)}</span>
                                     </div>
-                                    <div className="mt-2 text-[11px] md:text-xs font-bold text-gray-500">
-                                        {formatTime(currentTime)}
-                                    </div>
+                                    <div className="font-mono text-gray-700">{formatTime(currentTime)}</div>
                                 </div>
                             </div>
-                            <div className="grid grid-cols-2 md:grid-cols-2 gap-3 md:gap-4">
-                                <div className="flex items-center gap-3 md:gap-4 p-3 md:p-4 rounded-2xl bg-gray-50/80 border border-gray-100 shadow-sm">
-                                    <div className="w-10 h-10 md:w-12 md:h-12 rounded-xl bg-white flex items-center justify-center shadow-inner">
-                                        <Activity size={18} className="text-pink-400 md:w-5 md:h-5" />
+                            <div className="grid grid-cols-2 md:grid-cols-1 gap-3">
+                                <div className="flex items-center gap-3 p-4 rounded-2xl bg-white border border-gray-200 shadow-sm">
+                                    <div className="w-12 h-12 rounded-xl bg-gray-50 flex items-center justify-center border border-gray-200">
+                                        <Activity size={18} className="text-gray-600" />
                                     </div>
                                     <div className="leading-tight">
                                         <p className="text-[11px] md:text-xs font-semibold text-gray-500">{t('timeline.title')}</p>
-                                        <p className="text-lg md:text-xl lg:text-2xl font-bold text-gray-900">{events.length || 0}</p>
+                                        <p className="text-lg md:text-xl font-bold text-gray-900">{events.length || 0}</p>
                                     </div>
                                 </div>
                                 <button
                                     onClick={() => setIsWeightModalOpen(true)}
-                                    className="flex items-center gap-3 md:gap-4 p-3 md:p-4 rounded-2xl bg-gray-50 border border-gray-100 shadow-sm hover:shadow-md transition"
+                                    className="flex items-center gap-3 p-4 rounded-2xl bg-white border border-gray-200 shadow-sm hover:border-gray-300 transition text-left"
                                 >
-                                    <div className="w-10 h-10 md:w-12 md:h-12 rounded-xl bg-white flex items-center justify-center shadow-inner">
-                                        <Settings size={18} className="text-gray-500 md:w-5 md:h-5" />
+                                    <div className="w-12 h-12 rounded-xl bg-gray-50 flex items-center justify-center border border-gray-200">
+                                        <Settings size={18} className="text-gray-700" />
                                     </div>
-                                    <div className="text-left leading-tight">
+                                    <div className="leading-tight">
                                         <p className="text-[11px] md:text-xs font-semibold text-gray-500">{t('status.weight')}</p>
-                                        <p className="text-lg md:text-xl lg:text-2xl font-bold text-gray-900">{weight} kg</p>
+                                        <p className="text-lg md:text-xl font-bold text-gray-900">{weight} kg</p>
                                     </div>
                                 </button>
                             </div>
@@ -354,7 +401,7 @@ const AppContent = () => {
                                     </h2>
                                     <button
                                         onClick={handleAddEvent}
-                                        className="inline-flex items-center justify-center gap-2 px-3.5 py-2 h-11 rounded-xl bg-gray-900 text-white text-sm font-bold shadow-sm hover:shadow-md transition"
+                                        className="inline-flex md:hidden items-center justify-center gap-2 px-3.5 py-2 h-11 rounded-xl bg-gray-900 text-white text-sm font-bold shadow-sm hover:shadow-md transition"
                                     >
                                         <Plus size={16} />
                                         <span>{t('btn.add')}</span>
@@ -553,8 +600,8 @@ const AppContent = () => {
                     )}
                 </main>
 
-                {/* Bottom Navigation - Glassmorphism capsule style */}
-                <nav className="px-4 pb-4 pt-2 bg-transparent z-20 safe-area-pb shrink-0">
+                {/* Bottom Navigation - mobile only */}
+                <nav className="px-4 pb-4 pt-2 bg-transparent z-20 safe-area-pb shrink-0 md:hidden">
                     <div className="w-full bg-white/70 backdrop-blur-lg border border-white/40 rounded-3xl px-3 py-3 flex items-center justify-between gap-2">
                         <button
                             onClick={() => setCurrentView('home')}

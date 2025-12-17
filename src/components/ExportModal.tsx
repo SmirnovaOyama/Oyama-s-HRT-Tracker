@@ -13,6 +13,8 @@ const ExportModal = ({ isOpen, onClose, onExport, events, weight }: { isOpen: bo
     const [copyState, setCopyState] = useState<'idle' | 'copied'>('idle');
 
     const rawDataString = useMemo(() => events.length ? JSON.stringify({ weight, events }) : '', [events, weight]);
+    const QR_CHAR_LIMIT = 1500; // guard against oversized payloads that crash QR generator
+    const isTooLargeForQr = displayData.length > QR_CHAR_LIMIT;
 
     useEffect(() => {
         if (!isOpen) {
@@ -98,7 +100,7 @@ const ExportModal = ({ isOpen, onClose, onExport, events, weight }: { isOpen: bo
                                 </div>
                             </div>
 
-                            {displayData ? (
+                            {displayData && !isTooLargeForQr ? (
                                 <div className="flex flex-col items-center gap-4">
                                     <div className="bg-white p-4 rounded-2xl border border-gray-100 relative">
                                         <QRCodeCanvas value={displayData} size={200} includeMargin level="M" />
@@ -116,16 +118,45 @@ const ExportModal = ({ isOpen, onClose, onExport, events, weight }: { isOpen: bo
                                         </div>
                                     )}
 
-                                    <button
-                                        onClick={handleCopy}
-                                        className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-gray-900 text-white text-sm font-bold hover:bg-gray-800 transition"
-                                    >
-                                        <Copy size={16} /> {copyState === 'copied' ? t('qr.copied') : t('qr.copy')}
-                                    </button>
+                                    <div className="w-full grid grid-cols-1 md:grid-cols-2 gap-2">
+                                        <button
+                                            onClick={handleCopy}
+                                            className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-gray-900 text-white text-sm font-bold hover:bg-gray-800 transition"
+                                        >
+                                            <Copy size={16} /> {copyState === 'copied' ? t('qr.copied') : t('qr.copy')}
+                                        </button>
+                                        <button
+                                            onClick={() => onExport(isEncrypted)}
+                                            className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-gray-50 border border-gray-200 text-gray-800 text-sm font-bold hover:bg-gray-100 hover:border-gray-300 transition"
+                                        >
+                                            <Download size={16} /> {t('export.title')}
+                                        </button>
+                                    </div>
                                 </div>
                             ) : (
-                                <div className="text-center py-8 text-gray-400">
-                                    <p>{t('qr.export.empty')}</p>
+                                <div className="text-center py-8 text-gray-600 space-y-3">
+                                    {isTooLargeForQr ? (
+                                        <div className="mx-auto max-w-md text-sm text-gray-700 bg-gray-50 border border-gray-200 rounded-xl p-4 space-y-3">
+                                            <p className="text-base font-bold text-gray-900">{t('qr.too_large')}</p>
+                                            <p className="text-sm text-gray-700">{t('qr.too_large_desc') || t('drawer.save_hint')}</p>
+                                            <div className="flex flex-col gap-2">
+                                                <button
+                                                    onClick={handleCopy}
+                                                    className="inline-flex items-center justify-center px-3.5 py-2.5 rounded-lg bg-gray-900 text-white text-sm font-bold hover:bg-gray-800 transition"
+                                                >
+                                                    <Copy size={16} /> {copyState === 'copied' ? t('qr.copied') : t('qr.copy')}
+                                                </button>
+                                                <button
+                                                    onClick={() => setActiveTab('json')}
+                                                    className="inline-flex items-center justify-center px-3.5 py-2.5 rounded-lg bg-gray-50 border border-gray-200 text-sm font-bold text-gray-800 hover:border-gray-300 transition"
+                                                >
+                                                    {t('qr.go_json')}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <p>{t('qr.export.empty')}</p>
+                                    )}
                                 </div>
                             )}
                         </div>

@@ -7,6 +7,45 @@ import { getRouteIcon } from '../utils/helpers';
 import { Route, Ester, ExtraKey, DoseEvent, SL_TIER_ORDER, SublingualTierParams, getBioavailabilityMultiplier, getToE2Factor } from '../../logic';
 import { Calendar, X, Clock, Info, Save, Trash2 } from 'lucide-react';
 
+type DoseLevelKey = 'low' | 'medium' | 'high' | 'very_high' | 'above';
+
+type DoseGuideConfig = {
+    unitKey: 'mg_day' | 'ug_day' | 'mg_week';
+    thresholds: [number, number, number, number];
+    requiresRate?: boolean;
+};
+
+const DOSE_GUIDE_CONFIG: Partial<Record<Route, DoseGuideConfig>> = {
+    [Route.oral]: { unitKey: 'mg_day', thresholds: [2, 4, 8, 12] },
+    [Route.sublingual]: { unitKey: 'mg_day', thresholds: [1, 2, 4, 6] },
+    [Route.patchApply]: { unitKey: 'ug_day', thresholds: [100, 200, 400, 600], requiresRate: true },
+    [Route.gel]: { unitKey: 'mg_day', thresholds: [1.5, 3, 6, 9] },
+    [Route.injection]: { unitKey: 'mg_week', thresholds: [1, 2, 4, 6] },
+};
+
+const LEVEL_BADGE_STYLES: Record<DoseLevelKey, string> = {
+    low: 'bg-emerald-100 text-emerald-800',
+    medium: 'bg-sky-100 text-sky-800',
+    high: 'bg-amber-100 text-amber-800',
+    very_high: 'bg-rose-100 text-rose-800',
+    above: 'bg-red-100 text-red-800'
+};
+
+const LEVEL_CONTAINER_STYLES: Record<DoseLevelKey | 'neutral', string> = {
+    low: 'bg-emerald-50 border-emerald-100',
+    medium: 'bg-sky-50 border-sky-100',
+    high: 'bg-amber-50 border-amber-100',
+    very_high: 'bg-rose-50 border-rose-100',
+    above: 'bg-red-50 border-red-100',
+    neutral: 'bg-gray-50 border-gray-200'
+};
+
+const formatGuideNumber = (val: number) => {
+    if (Number.isInteger(val)) return val.toString();
+    const rounded = val < 1 ? val.toFixed(2) : val.toFixed(1);
+    return rounded.replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+};
+
 const DoseFormModal = ({ isOpen, onClose, eventToEdit, onSave, onDelete }: any) => {
     const { t } = useTranslation();
     const { showDialog } = useDialog();
@@ -254,6 +293,28 @@ const DoseFormModal = ({ isOpen, onClose, eventToEdit, onSave, onDelete }: any) 
         }
     }, [availableEsters, ester]);
 
+    const doseGuide = useMemo(() => {
+        const cfg = DOSE_GUIDE_CONFIG[route];
+        if (!cfg) return null;
+        if (route === Route.patchApply && patchMode === "dose" && cfg.requiresRate) {
+            return { config: cfg, level: null, value: null, showRateHint: true as const };
+        }
+        const rawVal = route === Route.patchApply ? parseFloat(patchRate) : parseFloat(e2Dose);
+        const value = Number.isFinite(rawVal) && rawVal > 0 ? rawVal : null;
+
+        let level: DoseLevelKey | null = null;
+        if (value !== null) {
+            const [low, medium, high, veryHigh] = cfg.thresholds;
+            if (value <= low) level = 'low';
+            else if (value <= medium) level = 'medium';
+            else if (value <= high) level = 'high';
+            else if (value <= veryHigh) level = 'very_high';
+            else level = 'above';
+        }
+
+        return { config: cfg, level, value, showRateHint: false as const };
+    }, [route, patchMode, patchRate, e2Dose]);
+
     if (!isOpen) return null;
 
     const tierKey = SL_TIER_ORDER[slTier] || "standard";
@@ -264,7 +325,24 @@ const DoseFormModal = ({ isOpen, onClose, eventToEdit, onSave, onDelete }: any) 
             ? slExtras[ExtraKey.sublingualTheta]!
             : 0.11)
         : currentTheta;
-    const bioDoseVal = parseFloat(e2Dose) || 0;
+
+    const guideUnitLabel = doseGuide?.config ? t(`dose.guide.unit.${doseGuide.config.unitKey}`) : "";
+    const guideRangeText = doseGuide?.config
+        ? [
+            `${t('dose.guide.level.low')} ≤ ${formatGuideNumber(doseGuide.config.thresholds[0])} ${guideUnitLabel}`,
+            `${t('dose.guide.level.medium')} ≤ ${formatGuideNumber(doseGuide.config.thresholds[1])} ${guideUnitLabel}`,
+            `${t('dose.guide.level.high')} ≤ ${formatGuideNumber(doseGuide.config.thresholds[2])} ${guideUnitLabel}`,
+            `${t('dose.guide.level.very_high')} ≤ ${formatGuideNumber(doseGuide.config.thresholds[3])} ${guideUnitLabel}`,
+        ].join(' · ')
+        : "";
+    const guideContainerClass = doseGuide
+        ? (
+            doseGuide.level
+                ? LEVEL_CONTAINER_STYLES[doseGuide.level]
+                : (doseGuide.showRateHint ? LEVEL_CONTAINER_STYLES.high : LEVEL_CONTAINER_STYLES.neutral)
+        )
+        : LEVEL_CONTAINER_STYLES.neutral;
+    const guideBadgeClass = doseGuide?.level ? LEVEL_BADGE_STYLES[doseGuide.level] : "";
 
     return (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-end md:items-center justify-center z-50 animate-in fade-in duration-200">
@@ -409,6 +487,35 @@ const DoseFormModal = ({ isOpen, onClose, eventToEdit, onSave, onDelete }: any) 
                                 <div className="space-y-2">
                                     <label className="block text-sm font-bold text-gray-700">{t('field.patch_rate')}</label>
                                     <input type="number" inputMode="decimal" value={patchRate} onChange={e => setPatchRate(e.target.value)} className="w-full p-4 border border-gray-200 rounded-xl focus:ring-2 focus:ring-pink-300 outline-none" placeholder="e.g. 50" />
+                                </div>
+                            )}
+
+                            {doseGuide && (
+                                <div className={`p-4 rounded-2xl border ${guideContainerClass} flex gap-3`}>
+                                    <Info className="w-5 h-5 text-gray-600 shrink-0 mt-0.5" />
+                                    <div className="space-y-1">
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-sm font-bold text-gray-800">{t('dose.guide.title')}</span>
+                                            {doseGuide.level && (
+                                                <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${guideBadgeClass}`}>
+                                                    {t(`dose.guide.level.${doseGuide.level}`)}
+                                                </span>
+                                            )}
+                                        </div>
+                                        <p className="text-xs text-gray-700">
+                                            {t('dose.guide.current')}: {doseGuide.value !== null ? `${formatGuideNumber(doseGuide.value)} ${guideUnitLabel}` : t('dose.guide.current_blank')}
+                                        </p>
+                                        {guideRangeText && (
+                                            <p className="text-[11px] text-gray-600 leading-relaxed">
+                                                {t('dose.guide.reference')}: {guideRangeText}
+                                            </p>
+                                        )}
+                                        {doseGuide.showRateHint && (
+                                            <p className="text-xs text-amber-700 leading-relaxed">
+                                                {t('dose.guide.patch_rate_hint')}
+                                            </p>
+                                        )}
+                                    </div>
                                 </div>
                             )}
 
