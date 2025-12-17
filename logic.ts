@@ -26,15 +26,15 @@ export enum ExtraKey {
     gelSite = "gelSite"
 }
 
-export enum GelSite {
+enum GelSite {
     arm = "arm",
     thigh = "thigh",
     scrotal = "scrotal"
 }
 
-export const GEL_SITE_ORDER = ["arm", "thigh", "scrotal"] as const;
+const GEL_SITE_ORDER = ["arm", "thigh", "scrotal"] as const;
 
-export const GelSiteParams = {
+const GelSiteParams = {
     [GelSite.arm]: 0.05,
     [GelSite.thigh]: 0.05,
     [GelSite.scrotal]: 0.40
@@ -57,14 +57,14 @@ export interface SimulationResult {
 
 // --- Constants & Parameters (PKparameter.swift & PKcore.swift) ---
 
-export const CorePK = {
+const CorePK = {
     vdPerKG: 2.0, // L/kg
     kClear: 0.41,
     kClearInjection: 0.041,
     depotK1Corr: 1.0
 };
 
-export const EsterInfo = {
+const EsterInfo = {
     [Ester.E2]: { name: "Estradiol", mw: 272.38 },
     [Ester.EB]: { name: "Estradiol Benzoate", mw: 376.50 },
     [Ester.EV]: { name: "Estradiol Valerate", mw: 356.50 },
@@ -77,21 +77,21 @@ export function getToE2Factor(ester: Ester): number {
     return EsterInfo[Ester.E2].mw / EsterInfo[ester].mw;
 }
 
-export const TwoPartDepotPK = {
+const TwoPartDepotPK = {
     Frac_fast: { [Ester.EB]: 0.90, [Ester.EV]: 0.40, [Ester.EC]: 0.229164549, [Ester.EN]: 0.05, [Ester.E2]: 1.0 },
     k1_fast: { [Ester.EB]: 0.144, [Ester.EV]: 0.0216, [Ester.EC]: 0.005035046, [Ester.EN]: 0.0010, [Ester.E2]: 0.5 }, // Added non-zero k1 for E2
     k1_slow: { [Ester.EB]: 0.114, [Ester.EV]: 0.0138, [Ester.EC]: 0.004510574, [Ester.EN]: 0.0050, [Ester.E2]: 0 }
 };
 
-export const InjectionPK = {
+const InjectionPK = {
     formationFraction: { [Ester.EB]: 0.1092, [Ester.EV]: 0.0623, [Ester.EC]: 0.1173, [Ester.EN]: 0.12, [Ester.E2]: 1.0 }
 };
 
-export const EsterPK = {
+const EsterPK = {
     k2: { [Ester.EB]: 0.090, [Ester.EV]: 0.070, [Ester.EC]: 0.045, [Ester.EN]: 0.015, [Ester.E2]: 0 }
 };
 
-export const OralPK = {
+const OralPK = {
     kAbsE2: 0.32,
     kAbsEV: 0.05,
     bioavailability: 0.03,

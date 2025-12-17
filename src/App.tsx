@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { v4 as uuidv4 } from 'uuid';
-import { Settings, Plus, Activity, Calendar, Languages, Upload, Download, Trash2, Info, Github } from 'lucide-react';
+import { Settings, Plus, Activity, Calendar, Languages, Upload, Download, Trash2, Info, Github, Copy } from 'lucide-react';
 import { useTranslation, LanguageProvider } from './contexts/LanguageContext';
 import { useDialog, DialogProvider } from './contexts/DialogContext';
 import { APP_VERSION } from './constants';
@@ -211,6 +211,24 @@ const AppContent = () => {
             return;
         }
         setIsExportModalOpen(true);
+    };
+
+    const handleQuickExport = () => {
+        if (events.length === 0) {
+            showDialog('alert', t('drawer.empty_export'));
+            return;
+        }
+        const exportData = {
+            meta: { version: 1, exportedAt: new Date().toISOString() },
+            weight: weight,
+            events: events
+        };
+        const json = JSON.stringify(exportData, null, 2);
+        navigator.clipboard.writeText(json).then(() => {
+            showDialog('alert', t('drawer.export_copied'));
+        }).catch(err => {
+            console.error('Failed to copy: ', err);
+        });
     };
 
     const downloadFile = (data: string, filename: string) => {
@@ -460,6 +478,17 @@ const AppContent = () => {
                                         <div className="text-left">
                                             <p className="font-bold text-gray-900 text-sm">{t('export.title')}</p>
                                             <p className="text-xs text-gray-500">{t('drawer.save_hint')}</p>
+                                        </div>
+                                    </button>
+
+                                    <button
+                                        onClick={handleQuickExport}
+                                        className="w-full flex items-center gap-3 px-4 py-4 hover:bg-blue-50 transition text-left"
+                                    >
+                                        <Copy className="text-blue-400" size={20} />
+                                        <div className="text-left">
+                                            <p className="font-bold text-gray-900 text-sm">{t('drawer.export_quick')}</p>
+                                            <p className="text-xs text-gray-500">{t('drawer.export_quick_hint')}</p>
                                         </div>
                                     </button>
 
