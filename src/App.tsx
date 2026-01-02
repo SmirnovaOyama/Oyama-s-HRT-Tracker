@@ -442,8 +442,9 @@ const AppContent = () => {
                 </div>
 
                 <div
+                    ref={mainScrollRef}
                     key={currentView}
-                    className={`flex-1 flex flex-col overflow-hidden page-transition ${transitionDirection === 'forward' ? 'page-forward' : 'page-backward'}`}
+                    className={`flex-1 flex flex-col overflow-y-auto scrollbar-hide page-transition ${transitionDirection === 'forward' ? 'page-forward' : 'page-backward'}`}
                 >
                     {/* Header */}
                     {currentView === 'home' && (
@@ -534,7 +535,7 @@ const AppContent = () => {
                         </header>
                     )}
 
-                    <main ref={mainScrollRef} className="flex-1 overflow-y-auto bg-white w-full scrollbar-hide px-4 py-6">
+                    <main className="bg-white w-full px-4 py-6">
                         {/* Chart */}
                         {currentView === 'home' && (
                             <ResultChart 

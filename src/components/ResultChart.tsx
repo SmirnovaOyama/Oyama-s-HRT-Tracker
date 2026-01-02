@@ -136,26 +136,26 @@ const ResultChart = ({ sim, events, labResults = [], calibrationFn = (_t: number
     const nowPoint = useMemo(() => {
         if (!sim || data.length === 0) return null;
         const h = now / 3600000;
+
         const concE2 = interpolateConcentration_E2(sim, h);
-        if (concE2 === null || Number.isNaN(concE2)) return null;
+        const concCPA = interpolateConcentration_CPA(sim, h);
+
+        // If both are null/NaN, return null
+        const hasE2 = concE2 !== null && !Number.isNaN(concE2);
+        const hasCPA = concCPA !== null && !Number.isNaN(concCPA);
+
+        if (!hasE2 && !hasCPA) return null;
+
         // Only calibrate E2, not CPA
-        const calibratedE2 = concE2 * calibrationFn(h); // pg/mL
+        const calibratedE2 = hasE2 ? concE2 * calibrationFn(h) : 0;
+        const finalCPA = hasCPA ? concCPA : 0;
+
         return {
             time: now,
-            concE2: calibratedE2 // E2 only in pg/mL (for positioning and status badge)
+            concE2: calibratedE2, // pg/mL
+            concCPA: finalCPA // ng/mL
         };
     }, [sim, data, now, calibrationFn]);
-
-    const nowPointCPA = useMemo(() => {
-        if (!sim || data.length === 0) return null;
-        const h = now / 3600000;
-        const concCPA = interpolateConcentration_CPA(sim, h);
-        if (concCPA === null || Number.isNaN(concCPA)) return null;
-        return {
-            time: now,
-            concCPA: concCPA // CPA in ng/mL
-        };
-    }, [sim, data, now]);
 
     // Slider helpers for quick panning (helps mobile users)
     // Initialize view: center on "now" with a reasonable window (e.g. 14 days)
@@ -292,7 +292,7 @@ const ResultChart = ({ sim, events, labResults = [], calibrationFn = (_t: number
                     ) : null;
                 })()}
                 <ResponsiveContainer width="100%" height="100%">
-                    <ComposedChart data={data} margin={{ top: 12, right: 30, bottom: 0, left: 30 }}>
+                    <ComposedChart data={data} margin={{ top: 12, right: 10, bottom: 0, left: 10 }}>
                         <defs>
                             <linearGradient id="colorConc" x1="0" y1="0" x2="0" y2="1">
                                 <stop offset="5%" stopColor="#f6c4d7" stopOpacity={0.18}/>
@@ -304,9 +304,9 @@ const ResultChart = ({ sim, events, labResults = [], calibrationFn = (_t: number
                             </linearGradient>
                         </defs>
                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f2f4f7" />
-                        <XAxis 
-                            dataKey="time" 
-                            type="number" 
+                        <XAxis
+                            dataKey="time"
+                            type="number"
                             domain={xDomain || ['auto', 'auto']}
                             allowDataOverflow={true}
                             tickFormatter={(ms) => formatDate(new Date(ms), lang)}
@@ -322,7 +322,8 @@ const ResultChart = ({ sim, events, labResults = [], calibrationFn = (_t: number
                             tick={{fontSize: 10, fill: '#ec4899', fontWeight: 600}}
                             axisLine={false}
                             tickLine={false}
-                            label={{ value: 'E2 (pg/mL)', angle: -90, position: 'left', offset: 10, style: { fontSize: 11, fill: '#ec4899', fontWeight: 700, textAnchor: 'middle' } }}
+                            width={50}
+                            label={{ value: 'E2 (pg/mL)', angle: -90, position: 'left', offset: 0, style: { fontSize: 11, fill: '#ec4899', fontWeight: 700, textAnchor: 'middle' } }}
                         />
                         <YAxis
                             yAxisId="right"
@@ -331,7 +332,8 @@ const ResultChart = ({ sim, events, labResults = [], calibrationFn = (_t: number
                             tick={{fontSize: 10, fill: '#8b5cf6', fontWeight: 600}}
                             axisLine={false}
                             tickLine={false}
-                            label={{ value: 'CPA (ng/mL)', angle: 90, position: 'right', offset: 10, style: { fontSize: 11, fill: '#8b5cf6', fontWeight: 700, textAnchor: 'middle' } }}
+                            width={50}
+                            label={{ value: 'CPA (ng/mL)', angle: 90, position: 'right', offset: 0, style: { fontSize: 11, fill: '#8b5cf6', fontWeight: 700, textAnchor: 'middle' } }}
                         />
                         <Tooltip 
                             content={<CustomTooltip t={t} lang={lang} />} 
@@ -383,7 +385,7 @@ const ResultChart = ({ sim, events, labResults = [], calibrationFn = (_t: number
                             }}
                         />
                         <Scatter
-                            data={nowPointCPA ? [nowPointCPA] : []}
+                            data={nowPoint ? [nowPoint] : []}
                             yAxisId="right"
                             isAnimationActive={false}
                             shape={({ cx, cy }: any) => {
