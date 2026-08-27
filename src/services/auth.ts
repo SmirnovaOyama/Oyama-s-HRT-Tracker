@@ -40,6 +40,22 @@ export interface Passkey {
     created_at: number;
 }
 
+/**
+ * Registration options minted by the server. They are not decoration: the
+ * relying-party id, the user handle and the algorithm list all have to be the
+ * server's, or the credential ends up unusable (see TwoFactor.tsx).
+ */
+export interface PasskeyRegisterOptions {
+    challengeToken: string;
+    challenge: string;
+    rp: { id: string; name: string };
+    user: { id: string; name: string; displayName: string };
+    pubKeyCredParams: { type: 'public-key'; alg: number }[];
+    excludeCredentialIds?: string[];
+    timeout?: number;
+    authenticatorSelection?: AuthenticatorSelectionCriteria;
+}
+
 // Serialise an ArrayBuffer (or BufferSource) to base64url without padding
 function ab2b64url(buf: ArrayBuffer): string {
     return btoa(String.fromCharCode(...new Uint8Array(buf)))
@@ -215,10 +231,16 @@ export const authService = {
         return await res.json() as { backupCodes: string[] };
     },
 
-    async generateBackupCodes(token: string): Promise<string[]> {
+    // Regenerating invalidates every existing code, so the server asks for the
+    // current password — send it or the call comes back 400.
+    async generateBackupCodes(token: string, password: string): Promise<string[]> {
         const res = await apiFetch('/api/user/2fa/backup-codes/generate', {
             method: 'POST',
-            headers: { 'Authorization': `Bearer ${token}` },
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`
+            },
+            body: JSON.stringify({ password }),
         });
         if (!res.ok) throw new Error(await res.text());
         const data = await res.json() as { codes: string[] };
@@ -233,14 +255,17 @@ export const authService = {
         return await res.json() as { remaining: number };
     },
 
-    async disable2FA(token: string, password: string, code: string): Promise<void> {
+    async disable2FA(token: string, password: string, code?: string, backupCode?: string): Promise<void> {
+        const body: { password: string; code?: string; backup_code?: string } = { password };
+        if (code) body.code = code;
+        if (backupCode) body.backup_code = backupCode;
         const res = await apiFetch('/api/user/2fa', {
             method: 'DELETE',
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${token}`
             },
-            body: JSON.stringify({ password, code })
+            body: JSON.stringify(body)
         });
         if (!res.ok) throw new Error(await res.text());
     },
@@ -253,13 +278,13 @@ export const authService = {
         return await res.json() as Passkey[];
     },
 
-    async registerPasskeyOptions(token: string): Promise<any> {
+    async registerPasskeyOptions(token: string): Promise<PasskeyRegisterOptions> {
         const res = await apiFetch('/api/user/passkey/register-options', {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${token}` },
         });
         if (!res.ok) throw new Error(await res.text());
-        return await res.json();
+        return await res.json() as PasskeyRegisterOptions;
     },
 
     async registerPasskey(token: string, challengeToken: string, credential: object, deviceName?: string): Promise<{ backupCodes?: string[] }> {
@@ -272,10 +297,16 @@ export const authService = {
         return await res.json() as { backupCodes?: string[] };
     },
 
-    async deletePasskey(token: string, id: string): Promise<void> {
+    // Removing a passkey can drop the account back to password-only, so the
+    // server asks for the current password here too.
+    async deletePasskey(token: string, id: string, password: string): Promise<void> {
         const res = await apiFetch(`/api/user/passkeys/${id}`, {
             method: 'DELETE',
-            headers: { 'Authorization': `Bearer ${token}` },
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`
+            },
+            body: JSON.stringify({ password }),
         });
         if (!res.ok) throw new Error(await res.text());
     },

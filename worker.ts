@@ -531,6 +531,24 @@ async function generateAndStoreBackupCodes(env: Env, userId: string, jwtSecret: 
   return codes;
 }
 
+/**
+ * Backup codes only mean anything while some second factor is active — the
+ * login path never looks at them otherwise. Leaving them behind after the last
+ * factor is removed was worse than useless: the first passkey registered later
+ * skips generating codes when the table already holds some, so the user was
+ * handed nothing and silently kept recovery codes they had every reason to
+ * believe were dead. Called after removing TOTP or a passkey.
+ */
+async function dropBackupCodesIfNoFactorsLeft(env: Env, userId: string): Promise<void> {
+  await ensurePasskeys(env);
+  const totpRow = await env.DB.prepare('SELECT totp_secret FROM users WHERE id = ?').bind(userId).first() as any;
+  if (totpRow?.totp_secret) return;
+  const pkRow = await env.DB.prepare('SELECT COUNT(*) as cnt FROM passkeys WHERE user_id = ?').bind(userId).first() as any;
+  if ((pkRow?.cnt ?? 0) > 0) return;
+  await ensureBackupCodes(env);
+  await env.DB.prepare('DELETE FROM backup_codes WHERE user_id = ?').bind(userId).run();
+}
+
 async function verifyAndConsumeBackupCode(env: Env, userId: string, code: string, jwtSecret: string): Promise<boolean> {
   await ensureBackupCodes(env);
   const normalized = code.trim().replace(/[-\s]/g, '').toLowerCase();
@@ -1947,19 +1965,30 @@ export default {
             return withSecurityHeaders(new Response(JSON.stringify({ message: '2FA enabled', backupCodes }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }));
           }
 
-          // DELETE /api/user/2fa — disable 2FA (requires current password + TOTP code)
+          // DELETE /api/user/2fa — disable TOTP (requires current password + a
+          // TOTP code or a single-use backup code)
           if (url.pathname === '/api/user/2fa' && request.method === 'DELETE') {
-            const { password, code } = await request.json() as any;
-            if (!password || !code) return withSecurityHeaders(new Response('Missing password or code', { status: 400, headers: corsHeaders }));
+            const { password, code, backup_code } = await request.json().catch(() => ({})) as any;
+            // A backup code is already enough to pass the second factor at login
+            // and to delete the account outright, so refusing it here only
+            // stranded anyone who lost their authenticator: they could sign in
+            // with a backup code but never turn TOTP off or re-enrol.
+            if (!password || (!code && !backup_code)) return withSecurityHeaders(new Response('Missing password or code', { status: 400, headers: corsHeaders }));
             const userRow = await env.DB.prepare('SELECT password_hash, totp_secret FROM users WHERE id = ?').bind(userId).first() as any;
             if (!userRow) return withSecurityHeaders(new Response('User not found', { status: 404, headers: corsHeaders }));
             const dummyHash = '$2a$10$CCCCCCCCCCCCCCCCCCCCC.O0D3I6./CCCCCCCCCCCCCCCCCCCCCCC';
             const passValid = await bcrypt.compare(password, userRow.password_hash ?? dummyHash);
             if (!passValid) return withSecurityHeaders(new Response('Incorrect password', { status: 401, headers: corsHeaders }));
             if (!userRow.totp_secret) return withSecurityHeaders(new Response('2FA is not enabled', { status: 400, headers: corsHeaders }));
-            const totpValid = await consumeTOTP(env, userId, userRow.totp_secret, String(code));
-            if (!totpValid) return withSecurityHeaders(new Response('Invalid 2FA code', { status: 400, headers: corsHeaders }));
-            await env.DB.prepare('UPDATE users SET totp_secret = NULL WHERE id = ?').bind(userId).run();
+            const twoFAValid = backup_code
+              ? await verifyAndConsumeBackupCode(env, userId, String(backup_code), jwtSecret)
+              : await consumeTOTP(env, userId, userRow.totp_secret, String(code));
+            if (!twoFAValid) return withSecurityHeaders(new Response('Invalid 2FA code', { status: 400, headers: corsHeaders }));
+            // Clearing totp_last_step too: it is scoped to the secret being
+            // removed, and a stale step would reject the first code of a fresh
+            // enrolment made inside the same 30-second window.
+            await env.DB.prepare('UPDATE users SET totp_secret = NULL, totp_last_step = NULL WHERE id = ?').bind(userId).run();
+            await dropBackupCodesIfNoFactorsLeft(env, userId);
             return withSecurityHeaders(new Response(JSON.stringify({ message: '2FA disabled' }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }));
           }
 
@@ -2013,12 +2042,22 @@ export default {
             const challengeToken = await new SignJWT({ challenge, purpose: 'passkey-register', uid: userId, origin })
               .setProtectedHeader({ alg: 'HS256' }).setExpirationTime('5m').sign(secret);
             const userIdEncoded = b64urlEncode(new TextEncoder().encode(userId));
+            // Hand the client the credentials this account already has so the
+            // authenticator refuses to enrol the same one twice, instead of
+            // walking the user through a prompt that ends in a 409.
+            const existingCreds = await env.DB.prepare('SELECT credential_id FROM passkeys WHERE user_id = ?').bind(userId).all();
+            const excludeCredentialIds = (existingCreds.results || []).map((r: any) => r.credential_id as string);
             return withSecurityHeaders(new Response(JSON.stringify({
               challengeToken,
               challenge,
               rp: { id: rpId, name: 'HRT Tracker' },
               user: { id: userIdEncoded, name: userRow?.username || userId, displayName: userRow?.username || userId },
+              // ES256 only — verifyPasskeyAssertion imports a P-256 key and the
+              // stored public key is an EC x/y pair. Offering RS256 as well got
+              // RSA credentials out of Windows Hello that registration then
+              // rejected with "No credential data in authData".
               pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+              excludeCredentialIds,
               timeout: 60000,
               authenticatorSelection: { residentKey: 'preferred', userVerification: 'preferred' },
               attestation: 'none',
@@ -2107,6 +2146,7 @@ export default {
               return withSecurityHeaders(new Response('Incorrect password', { status: 401, headers: corsHeaders }));
             }
             await env.DB.prepare('DELETE FROM passkeys WHERE id = ? AND user_id = ?').bind(passkeyId, userId).run();
+            await dropBackupCodesIfNoFactorsLeft(env, userId);
             return withSecurityHeaders(new Response(JSON.stringify({ message: 'Passkey deleted' }), {
               status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
             }));
