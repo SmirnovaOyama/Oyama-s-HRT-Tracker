@@ -1,9 +1,9 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { X, Loader2, Fingerprint } from 'lucide-react';
 import ShieldIcon from './ShieldIcon';
 import { useAuth } from '../contexts/AuthContext';
 import { useTranslation } from '../contexts/LanguageContext';
-import { authService, serializeAssertionCredential, b64url2ab } from '../services/auth';
+import { authService, serializeAssertionCredential, b64url2ab, AuthResponse } from '../services/auth';
 
 interface AuthModalProps {
     isOpen: boolean;
@@ -23,10 +23,42 @@ const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
     const [backupCode, setBackupCode] = useState('');
     const [passkeyLoading, setPasskeyLoading] = useState(false);
 
+    /**
+     * The credential the server accepted, frozen at the moment it accepted it.
+     *
+     * This is what the cloud key gets derived from on the passkey second-factor
+     * path, and it deliberately does not read the live form state. Two reasons,
+     * both of which produce a wrong key rather than no key:
+     *
+     *   - The password and username inputs stay mounted and editable through
+     *     the whole second-factor step, and a password manager is as likely to
+     *     re-fill them as the user is to retype. Only the value the server
+     *     actually checked may be used.
+     *   - The passkey step can be entered by a deferred call (see the
+     *     `needs2FA` branch below, which auto-starts the WebAuthn prompt), and
+     *     that call runs a closure from the render *before* the state flag was
+     *     set. A ref is read when it fires, so it sees the credential; the flag
+     *     it replaced was still false there, and silently skipped the derive.
+     *
+     * Null whenever no password has been verified in this form's lifetime.
+     */
+    const verifiedRef = useRef<{ username: string; password: string } | null>(null);
+
     const { login, register, loginWithToken } = useAuth();
     const { t } = useTranslation();
 
     if (!isOpen) return null;
+
+    /** The password to derive this device's cloud key from, or nothing. */
+    const verifiedPasswordFor = (result: AuthResponse): string | undefined => {
+        const verified = verifiedRef.current;
+        // The account the passkey resolved to has to be the one the password
+        // was checked against: the key's salt is the user id, so a mismatch
+        // would derive one account's key out of another's password.
+        return verified && result.user.username === verified.username
+            ? verified.password
+            : undefined;
+    };
 
     const handlePasskeyLogin = async () => {
         if (!window.PublicKeyCredential) {
@@ -51,7 +83,11 @@ const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
             }) as PublicKeyCredential | null;
             if (!credential) return;
             const result = await authService.passkeyAuthVerify(opts.challengeToken, serializeAssertionCredential(credential));
-            loginWithToken(result);
+            // Nothing when the passkey *is* the whole sign-in: no password was
+            // ever seen, so no key can be derived, and the Account page's
+            // unlock row is the way in. Something when it was the second factor
+            // after one the server accepted — see `verifiedRef`.
+            await loginWithToken(result, verifiedPasswordFor(result));
             onClose();
         } catch (e: any) {
             if (e.name !== 'NotAllowedError') {
@@ -87,9 +123,18 @@ const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
             setTotpCode('');
             setUseBackupCode(false);
             setBackupCode('');
+            // This component is never unmounted, only hidden, so a credential
+            // left here would still be sitting in the ref the next time the
+            // modal opens — by which point the password may have changed
+            // elsewhere.
+            verifiedRef.current = null;
         } catch (err: any) {
             if (err.needs2FA) {
                 const method: 'totp' | 'passkey' = err.method ?? 'totp';
+                // Reaching here means the server checked this password and was
+                // satisfied — /api/login only answers needs2FA after the bcrypt
+                // compare passes. Freeze it now; the form is still editable.
+                verifiedRef.current = { username, password };
                 setNeedsTOTP(true);
                 setTwoFAMethod(method);
                 setError(null);
@@ -239,7 +284,7 @@ const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
                         {isLogin ? t('auth.no_account') : t('auth.has_account')}{' '}
                         <button
                             type="button"
-                            onClick={() => { setIsLogin(!isLogin); setError(null); }}
+                            onClick={() => { setIsLogin(!isLogin); setError(null); verifiedRef.current = null; }}
                             className="text-[var(--color-m3-primary)] dark:text-[var(--color-m3-primary-light)] hover:underline"
                         >
                             {isLogin ? t('auth.go_register') : t('auth.go_login')}

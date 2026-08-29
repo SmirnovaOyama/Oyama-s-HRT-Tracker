@@ -10,7 +10,7 @@ import { parseCloudBackup } from './utils/cloudBackup';
 import { useAppData } from './hooks/useAppData';
 import { useAppNavigation, ViewKey } from './hooks/useAppNavigation';
 import { useLiveShareSync } from './hooks/useLiveShareSync';
-import { useCloudSync } from './hooks/useCloudSync';
+import { useCloudSync, SyncOutcome } from './hooks/useCloudSync';
 
 import WeightEditorModal from './components/WeightEditorModal';
 import DoseFormModal from './components/DoseFormModal';
@@ -50,6 +50,14 @@ import PublicShare from './pages/PublicShare';
 import ShareSettings from './pages/ShareSettings';
 import Onboarding, { markOnboardingSeen, shouldShowOnboarding } from './pages/Onboarding';
 import SiteNoticeBanner from './components/SiteNotice';
+
+/** What the manual backup button reports back, per reconcile outcome. */
+const CLOUD_SAVE_MESSAGE: Record<SyncOutcome, string> = {
+    synced: 'account.cloud_save_success',
+    locked: 'account.cloud_save_locked',
+    busy: 'account.cloud_save_busy',
+    error: 'account.cloud_save_failed',
+};
 
 const AppContent = () => {
     const { t, lang, setLang } = useTranslation();
@@ -310,10 +318,27 @@ const AppContent = () => {
     // first would let one device's press erase a dose another device deleted.
     // Works with auto-sync switched off; refuses when the cloud copy is
     // encrypted and unreadable here, rather than replacing it with plaintext.
+    //
+    // Each outcome gets its own sentence. One "failed to save to cloud" used to
+    // cover all of them, including the two that are not failures at all: a sync
+    // that was already running, and a cloud copy this device holds no key for —
+    // where nothing was attempted and pressing again could never help.
     const handleCloudSave = async () => {
         if (!token) { setIsAuthModalOpen(true); return; }
-        const ok = await syncState.syncNow();
-        showDialog('alert', t(ok ? 'account.cloud_save_success' : 'account.cloud_save_failed'));
+        const liveBefore = !!localStorage.getItem('auth_token');
+        const outcome = await syncState.syncNow();
+        // A save that died with the session has already put "please sign in
+        // again" on screen, from the 401 handler in AuthContext. The dialog
+        // holds one message, so alerting here replaced the only explanation of
+        // what happened with "failed to save to cloud" — on a screen that had
+        // just dropped back to the sign-in form.
+        //
+        // Both halves are needed. That handler bails out when the token is
+        // already gone, so if it went in another tab there is no dialog to
+        // protect, and testing the token alone would leave the press answered
+        // by nothing at all.
+        if (liveBefore && !localStorage.getItem('auth_token')) return;
+        showDialog('alert', t(CLOUD_SAVE_MESSAGE[outcome]));
     };
 
     const handleCloudLoad = async (backupId?: string) => {

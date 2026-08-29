@@ -51,19 +51,36 @@ export type SyncStatus =
     /** Network or server error; the next trigger retries. */
     | 'error';
 
+/**
+ * Why a manual reconcile ended where it did.
+ *
+ * A bare boolean used to stand in for this, and the button that calls it turned
+ * every non-success into one "failed to save to cloud" — the same sentence for
+ * a dropped connection, a sync that was already running, and a cloud copy this
+ * device holds no key for. The last of those is not a failure the user can
+ * retry their way out of, and saying so sent people pressing a button that
+ * could never work.
+ */
+export type SyncOutcome =
+    | 'synced'
+    /** No key here: nothing was read, nothing was written. Unlock first. */
+    | 'locked'
+    /** A reconcile was already in flight; it has been asked to run again. */
+    | 'busy'
+    | 'error';
+
 export interface CloudSyncState {
     status: SyncStatus;
     /** Epoch ms of the last successful reconcile, or null if none yet this session. */
     lastSyncedAt: number | null;
     /**
-     * Reconcile right now, ignoring the auto-sync toggle. Resolves true when the
-     * cloud ends up holding this device's data.
+     * Reconcile right now, ignoring the auto-sync toggle.
      *
      * This is what the manual "back up to cloud" button runs. It cannot be a
      * plain upload: that would overwrite the newest revision without reading it,
      * which is how one device's press erases a deletion another device made.
      */
-    syncNow: () => Promise<boolean>;
+    syncNow: () => Promise<SyncOutcome>;
 }
 
 interface Options {
@@ -151,9 +168,27 @@ export const useCloudSync = ({
     userIdRef.current = userId;
     const activeRef = useRef(false);
     activeRef.current = !!token && !!userId && enabled && ready;
+    /**
+     * Held separately because `force` waives the rest of `activeRef` and must
+     * not waive this one: mid-switch, `buildPayload` returns one account's (or
+     * one mode's) records while storage is already pointed at another's, and
+     * uploading that mixes the two in the cloud copy.
+     */
+    const readyRef = useRef(false);
+    readyRef.current = ready;
 
     const runningRef = useRef(false);
     const rerunRef = useRef(false);
+    /**
+     * Whether the deferred run needs to be a forced one.
+     *
+     * The handoff below only re-runs while auto-sync is on, which is right for
+     * the triggers that scheduled themselves — but a press of the manual backup
+     * button that arrived mid-run is deferred through the same flag, and with
+     * the toggle off it would have been dropped on the floor after the caller
+     * had already been told a sync was on its way.
+     */
+    const rerunForceRef = useRef(false);
     const lastSyncAttemptRef = useRef(0);
     const pushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     /**
@@ -230,13 +265,18 @@ export const useCloudSync = ({
      * backup button, which is a deliberate act rather than a scheduled one.
      * It still refuses to write over a cloud copy it could not read.
      */
-    const runSync = useCallback(async (force = false): Promise<boolean> => {
-        if (!force && !activeRef.current) return false;
-        if (runningRef.current) { rerunRef.current = true; return false; }
+    const runSync = useCallback(async (force = false): Promise<SyncOutcome> => {
+        if (!force && !activeRef.current) return 'error';
+        if (!readyRef.current) return 'error';
+        if (runningRef.current) {
+            rerunRef.current = true;
+            if (force) rerunForceRef.current = true;
+            return 'busy';
+        }
 
         const authToken = tokenRef.current;
         const account = userIdRef.current;
-        if (!authToken || !account) return false;
+        if (!authToken || !account) return 'error';
 
         runningRef.current = true;
         lastSyncAttemptRef.current = Date.now();
@@ -244,7 +284,7 @@ export const useCloudSync = ({
 
         try {
             const { read: remote, newestId } = await readRemote(authToken);
-            if (!stillCurrent(account, authToken, force)) return false;
+            if (!stillCurrent(account, authToken, force)) return 'error';
 
             // `locked` covers a cloud copy this device cannot read. The
             // `!hasCloudKey()` half covers the mirror case the write path used to
@@ -256,11 +296,11 @@ export const useCloudSync = ({
             if (remote.kind === 'locked' || !hasCloudKey()) {
                 lockedRef.current = true;
                 setState(prev => ({ ...prev, status: 'locked' }));
-                return false;
+                return 'locked';
             }
             if (remote.kind === 'unreadable') {
                 setState(prev => ({ ...prev, status: 'error' }));
-                return false;
+                return 'error';
             }
             lockedRef.current = false;
 
@@ -277,13 +317,13 @@ export const useCloudSync = ({
                 lastSeenBackupRef.current = newestId;
                 if (hasContent(local) && fingerprint !== lastPushedRef.current) {
                     const savedId = await cloudService.save(authToken, await prepareCloudPayload(localPayload));
-                    if (!stillCurrent(account, authToken, force)) return false;
+                    if (!stillCurrent(account, authToken, force)) return 'error';
                     lastPushedRef.current = fingerprint;
                     lastSeenBackupRef.current = savedId;
                 }
                 bootstrappedForRef.current = account;
                 setState(prev => ({ ...prev, status: 'synced', lastSyncedAt: Date.now() }));
-                return true;
+                return 'synced';
             }
 
             const result = mergeSyncStates(local, remote.kind === 'state' ? remote.state : null);
@@ -300,21 +340,28 @@ export const useCloudSync = ({
                     ? toPayload(localPayload, result.merged)
                     : localPayload;
                 const savedId = await cloudService.save(authToken, await prepareCloudPayload(outgoing));
-                if (!stillCurrent(account, authToken, force)) return false;
+                if (!stillCurrent(account, authToken, force)) return 'error';
                 lastSeenBackupRef.current = savedId;
             }
             lastPushedRef.current = mergedFingerprint;
             bootstrappedForRef.current = account;
             setState(prev => ({ ...prev, status: 'synced', lastSyncedAt: Date.now() }));
-            return true;
+            return 'synced';
         } catch {
             setState(prev => ({ ...prev, status: 'error' }));
-            return false;
+            return 'error';
         } finally {
             runningRef.current = false;
-            if (rerunRef.current && activeRef.current) {
+            // `readyRef` is checked here as well as inside runSync, because the
+            // handoff clears the flags before calling: a run rejected for
+            // readiness would consume the deferred press and answer nobody,
+            // after the caller had already been told a sync was coming. Left
+            // set, the next trigger picks the work back up.
+            if (rerunRef.current && readyRef.current && (activeRef.current || rerunForceRef.current)) {
                 rerunRef.current = false;
-                void runSync();
+                const forced = rerunForceRef.current;
+                rerunForceRef.current = false;
+                void runSync(forced);
             }
         }
     }, [readRemote, stillCurrent]);
@@ -365,9 +412,16 @@ export const useCloudSync = ({
             setState(prev => ({ ...prev, status: 'error' }));
         } finally {
             runningRef.current = false;
-            if (rerunRef.current && activeRef.current) {
+            // `readyRef` is checked here as well as inside runSync, because the
+            // handoff clears the flags before calling: a run rejected for
+            // readiness would consume the deferred press and answer nobody,
+            // after the caller had already been told a sync was coming. Left
+            // set, the next trigger picks the work back up.
+            if (rerunRef.current && readyRef.current && (activeRef.current || rerunForceRef.current)) {
                 rerunRef.current = false;
-                void runSync();
+                const forced = rerunForceRef.current;
+                rerunForceRef.current = false;
+                void runSync(forced);
             }
         }
     }, [runSync, stillCurrent]);
@@ -380,6 +434,7 @@ export const useCloudSync = ({
         lockedRef.current = false;
         lastSyncAttemptRef.current = 0;
         rerunRef.current = false;
+        rerunForceRef.current = false;
         if (!token || !userId) {
             setState({ status: 'off', lastSyncedAt: null });
         } else {
@@ -402,24 +457,42 @@ export const useCloudSync = ({
             void runSync();
         };
         const onVisibility = () => { if (!document.hidden) syncIfDue(); };
-        // A reconnect or a freshly supplied key is worth acting on immediately —
-        // both mean the previous attempt failed for a reason that just went away.
+        // A reconnect is worth acting on immediately — it means the previous
+        // attempt failed for a reason that just went away.
         const onOnline = () => { void runSync(); };
-        const onKeyChange = () => { void runSync(); };
         const poll = window.setInterval(() => { if (!document.hidden) syncIfDue(); }, POLL_INTERVAL_MS);
 
         document.addEventListener('visibilitychange', onVisibility);
         window.addEventListener('focus', onVisibility);
         window.addEventListener('online', onOnline);
-        window.addEventListener(CLOUD_KEY_CHANGED_EVENT, onKeyChange);
         return () => {
             window.clearInterval(poll);
             document.removeEventListener('visibilitychange', onVisibility);
             window.removeEventListener('focus', onVisibility);
             window.removeEventListener('online', onOnline);
-            window.removeEventListener(CLOUD_KEY_CHANGED_EVENT, onKeyChange);
         };
     }, [token, userId, enabled, ready, runSync]);
+
+    // --- A key arriving on this device ---
+    // Deliberately not gated on the auto-sync toggle, unlike the triggers
+    // above. `locked` is reachable with auto-sync off — the manual backup
+    // button forces a reconcile either way — and it is the one status that
+    // asks the user to go and do something. Leaving it on screen after they
+    // have done it, with nothing scheduled to correct it, reads as though the
+    // unlock didn't take.
+    useEffect(() => {
+        if (!token || !userId) return;
+        const onKeyChange = () => {
+            if (!hasCloudKey()) return;
+            lockedRef.current = false;
+            if (activeRef.current) { void runSync(); return; }
+            setState(prev => prev.status === 'locked'
+                ? { ...prev, status: enabled ? 'idle' : 'off' }
+                : prev);
+        };
+        window.addEventListener(CLOUD_KEY_CHANGED_EVENT, onKeyChange);
+        return () => window.removeEventListener(CLOUD_KEY_CHANGED_EVENT, onKeyChange);
+    }, [token, userId, enabled, runSync]);
 
     // --- Local edits: debounced push ---
     // Depends only on the data, never on auth or the toggle. Including those

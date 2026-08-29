@@ -113,6 +113,71 @@ export async function unlockCloudBackup(
     catch { return { status: 'corrupt' }; }
 }
 
+export type CloudKeyResult =
+    /** A key is now cached on this device; sync can read and write again. */
+    | 'unlocked'
+    /** There is ciphertext up there and this password does not open it. */
+    | 'wrong-password'
+    /** No SubtleCrypto here — a non-secure origin. No password can help. */
+    | 'unsupported';
+
+/**
+ * Give this device the key for the account's cloud backups, from the account
+ * password.
+ *
+ * `revisions` yields the raw stored bodies of the account's revisions, newest
+ * first. It is walked lazily and abandoned at the first one the derived key
+ * opens, so the common case costs a single fetch — but when nothing opens, it
+ * has to be walked to the end. Anything short of that decides "this account
+ * holds no ciphertext" from a sample, and the caller cannot tell a plaintext
+ * revision sitting on top of encrypted history from an account that has none.
+ *
+ * The key is cached only once it has actually opened a revision, so a mistyped
+ * password cannot leave the device encrypting under a key nothing else in the
+ * account shares.
+ *
+ * With one exception, which is the reason `revisions` has to be exhaustive:
+ * when the account holds no ciphertext at all, there is nothing to check
+ * against and the key is cached unverified. Refusing instead would be a dead
+ * end — the status this unlocks is reachable with an empty cloud, since it
+ * turns on this device holding no key rather than on what is stored — and a
+ * wrong key orphans nothing when there is nothing up there to orphan. What it
+ * can still do is leave two devices writing under different keys until one of
+ * them signs in with a password again; neither loses records, because each
+ * keeps its own copy locally and the mismatch resolves the way a password
+ * change already does, by superseding the copy that cannot be read.
+ *
+ * This is the way back from `locked` for a device that signed in with a passkey
+ * alone: no password was ever seen, so no key could be derived at sign-in.
+ */
+export async function establishCloudKey(
+    password: string,
+    userId: string,
+    revisions: AsyncIterable<string | unknown> | Iterable<string | unknown>,
+): Promise<CloudKeyResult> {
+    let candidate: string;
+    try { candidate = await deriveCloudKey(password, userId); }
+    catch { return 'unsupported'; }
+
+    let sawEncrypted = false;
+    for await (const raw of revisions) {
+        const parsed = toEnvelope(raw);
+        // A body that isn't JSON is a truncated write, and says nothing about
+        // the ones under it. Keep looking rather than concluding the account
+        // holds no ciphertext.
+        if (parsed === undefined || !isCloudEncrypted(parsed)) continue;
+        sawEncrypted = true;
+        if (await decryptCloudPayload(parsed, candidate) !== null) {
+            cacheCloudKey(candidate);
+            return 'unlocked';
+        }
+    }
+
+    if (sawEncrypted) return 'wrong-password';
+    cacheCloudKey(candidate);
+    return 'unlocked';
+}
+
 /** Parse a stored cloud backup string/object, decrypting when needed. */
 export async function parseCloudBackup(rawData: string | unknown): Promise<any | null> {
     const res = await readCloudBackup(rawData);

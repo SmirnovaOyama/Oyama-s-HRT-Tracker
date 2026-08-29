@@ -1,11 +1,11 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { UploadCloud, LogOut, BadgeCheck, Edit2, Loader2, Trash2, Cloud, HardDrive, DownloadCloud, Merge, ChevronDown, Plus, Minus, Fingerprint, Lock, MonitorSmartphone, RefreshCw, CloudOff, CheckCircle2, AlertCircle } from 'lucide-react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { UploadCloud, LogOut, BadgeCheck, Edit2, Loader2, Trash2, Cloud, HardDrive, DownloadCloud, Merge, ChevronDown, ChevronRight, Plus, Minus, Fingerprint, Lock, MonitorSmartphone, RefreshCw, CloudOff, CheckCircle2, AlertCircle } from 'lucide-react';
 import ShieldIcon from '../components/ShieldIcon';
 import { SettingsListItem } from '../components/SettingsListItem';
 
 import { useAuth } from '../contexts/AuthContext';
 import { cloudService, BackupMeta } from '../services/cloud';
-import { readCloudBackup, unlockCloudBackup, normalizeBackupPayload } from '../utils/cloudBackup';
+import { readCloudBackup, unlockCloudBackup, normalizeBackupPayload, establishCloudKey } from '../utils/cloudBackup';
 import { useDialog } from '../contexts/DialogContext';
 import { authService, serializeAssertionCredential, b64url2ab } from '../services/auth';
 import PasswordInputModal from '../components/PasswordInputModal';
@@ -82,6 +82,11 @@ const Account: React.FC<AccountProps> = ({
     const [unlockTarget, setUnlockTarget] = useState<{ rawData: any; backupId: string } | null>(null);
     const [unlockError, setUnlockError] = useState<string | null>(null);
     const [unlockLoading, setUnlockLoading] = useState(false);
+    // The same prompt, reached from the sync status line rather than from one
+    // backup — it unlocks the account rather than opening a single revision.
+    const [syncUnlockOpen, setSyncUnlockOpen] = useState(false);
+    const [syncUnlockError, setSyncUnlockError] = useState<string | null>(null);
+    const [syncUnlockLoading, setSyncUnlockLoading] = useState(false);
     const { showDialog } = useDialog();
 
     // Inline auth form state
@@ -96,6 +101,8 @@ const Account: React.FC<AccountProps> = ({
     const [useBackupCode, setUseBackupCode] = useState(false);
     const [backupCode, setBackupCode] = useState('');
     const [passkeyLoading, setPasskeyLoading] = useState(false);
+    /** See AuthModal: the credential the server accepted, frozen when it did. */
+    const verifiedRef = useRef<{ username: string; password: string } | null>(null);
     const { login, register, loginWithToken } = useAuth();
 
     // `silent` refreshes the list in place. Sync reports in on its own schedule
@@ -201,6 +208,50 @@ const Account: React.FC<AccountProps> = ({
         setExpandedId(null);
     };
 
+    /**
+     * Give this device the key again, from the sync status line.
+     *
+     * This is the way out of `locked` — which, before it existed, had no way
+     * out that anyone would find. A device signed in with a passkey alone never
+     * saw a password to derive a key from, so sync could only report that the
+     * cloud copy was encrypted, and the backup button could only fail. The one
+     * unlock prompt in the app was behind expanding an individual backup row,
+     * which reads as "look inside this revision", not "fix sync".
+     *
+     * The list is re-fetched rather than read from `backupList`, and every
+     * revision in it is offered rather than the newest few: both shortcuts
+     * would look like an account holding no ciphertext, which is the one case
+     * `establishCloudKey` accepts a password it could not check. Bodies are
+     * fetched one at a time as it asks for them, so the ordinary case — the
+     * newest revision opens — costs a single request.
+     */
+    const handleSyncUnlockSubmit = async (password: string) => {
+        if (!token || !user) return;
+        setSyncUnlockLoading(true);
+        setSyncUnlockError(null);
+        try {
+            const metas = await cloudService.listMeta(token);
+            const newestFirst = [...(metas ?? [])].sort((a, b) => b.created_at - a.created_at);
+            async function* bodies() {
+                for (const meta of newestFirst) {
+                    yield (await cloudService.loadOne(token!, meta.id)).data;
+                }
+            }
+
+            const result = await establishCloudKey(password, user.id, bodies());
+            if (result === 'unlocked') {
+                // Caching the key announces itself; sync picks it up from there.
+                setSyncUnlockOpen(false);
+                return;
+            }
+            setSyncUnlockError(t(result === 'wrong-password' ? 'account.unlock_failed' : 'error.generic'));
+        } catch {
+            setSyncUnlockError(t('error.generic'));
+        } finally {
+            setSyncUnlockLoading(false);
+        }
+    };
+
     const computeDiff = (backupData: any) => {
         const localEventIds = new Set(localData.events.map((e: any) => e.id));
         const localLabIds = new Set(localData.labResults.map((r: any) => r.id));
@@ -247,9 +298,15 @@ const Account: React.FC<AccountProps> = ({
             setTotpCode('');
             setUseBackupCode(false);
             setBackupCode('');
+            verifiedRef.current = null;
         } catch (err: any) {
             if (err.needs2FA) {
                 const method: 'totp' | 'passkey' = err.method ?? 'totp';
+                // The server only answers needs2FA after the bcrypt compare
+                // passes, so this password is verified. Freeze it: the form
+                // stays editable, and the deferred passkey call below runs a
+                // closure from the render before `needsTOTP` was set.
+                verifiedRef.current = { username, password };
                 setNeedsTOTP(true);
                 setTwoFAMethod(method);
                 setAuthError(null);
@@ -287,7 +344,16 @@ const Account: React.FC<AccountProps> = ({
             }) as PublicKeyCredential | null;
             if (!credential) return;
             const result = await authService.passkeyAuthVerify(opts.challengeToken, serializeAssertionCredential(credential));
-            loginWithToken(result);
+            // See AuthModal's `verifiedRef` for the reasoning: only a password
+            // the server accepted, and only when the passkey resolved to the
+            // same account it was accepted for.
+            const verified = verifiedRef.current;
+            await loginWithToken(
+                result,
+                verified && result.user.username === verified.username
+                    ? verified.password
+                    : undefined,
+            );
         } catch (e: any) {
             if (e.name !== 'NotAllowedError') {
                 setAuthError(e.message || t('auth.passkey_failed'));
@@ -296,6 +362,10 @@ const Account: React.FC<AccountProps> = ({
             setPasskeyLoading(false);
         }
     };
+
+    // Locked means this device holds no key for the account's cloud copy: it
+    // can neither read what is up there nor encrypt what it would write.
+    const isLocked = syncStatus === 'locked';
 
     const inputCls = "w-full px-3 py-2.5 text-sm bg-[var(--color-m3-surface-container-lowest)] dark:bg-[var(--color-m3-dark-surface-container-low)] border border-[var(--color-m3-outline-variant)] dark:border-[var(--color-m3-dark-outline-variant)] rounded-md focus:outline-none focus:ring-1 focus:ring-[var(--color-m3-primary)]/30 focus:border-[var(--color-m3-primary)] text-[var(--color-m3-on-surface)] dark:text-[var(--color-m3-dark-on-surface)]";
 
@@ -380,25 +450,51 @@ const Account: React.FC<AccountProps> = ({
                         {/* Sync runs on its own — no prompts, no buttons. This line
                             is the only place it reports for duty, so a failure
                             (or a backup this device can't decrypt) is visible
-                            somewhere rather than silently never happening. */}
-                        <div className={`flex items-center gap-2.5 py-3 ${divider}`}>
-                            <SyncIcon status={syncStatus} className={iconCls} />
-                            <div className="flex-1 min-w-0">
-                                <p className="text-sm text-[var(--color-m3-on-surface)] dark:text-[var(--color-m3-dark-on-surface)]">
-                                    {t(`sync.status.${syncStatus}`)}
-                                </p>
-                                {lastSyncedAt !== null && syncStatus !== 'off' && (
-                                    <p className="text-xs text-[var(--color-m3-on-surface-variant)] dark:text-[var(--color-m3-dark-on-surface-variant)]">
-                                        {(t('sync.last_synced') as string).replace('{time}', new Date(lastSyncedAt).toLocaleTimeString())}
-                                    </p>
-                                )}
-                            </div>
-                        </div>
+                            somewhere rather than silently never happening.
 
+                            `locked` is the exception: it is the one status that
+                            asks the user for something, so there it stops being
+                            a label and becomes the control that does it. */}
+                        {isLocked ? (
+                            <button
+                                type="button"
+                                onClick={() => { setSyncUnlockError(null); setSyncUnlockOpen(true); }}
+                                className={`w-full flex items-center gap-2.5 py-3 ${divider} text-start hover:bg-[var(--color-m3-surface-container)] dark:hover:bg-[var(--color-m3-dark-surface-container)] -mx-2 px-2 rounded`}
+                            >
+                                <SyncIcon status={syncStatus} className={iconCls} />
+                                <div className="flex-1 min-w-0">
+                                    <p className="text-sm text-[var(--color-m3-on-surface)] dark:text-[var(--color-m3-dark-on-surface)]">
+                                        {t('sync.status.locked')}
+                                    </p>
+                                    <p className="text-xs text-[var(--color-m3-primary)]">{t('sync.unlock_cta')}</p>
+                                </div>
+                                <ChevronRight size={16} className={iconCls} />
+                            </button>
+                        ) : (
+                            <div className={`flex items-center gap-2.5 py-3 ${divider}`}>
+                                <SyncIcon status={syncStatus} className={iconCls} />
+                                <div className="flex-1 min-w-0">
+                                    <p className="text-sm text-[var(--color-m3-on-surface)] dark:text-[var(--color-m3-dark-on-surface)]">
+                                        {t(`sync.status.${syncStatus}`)}
+                                    </p>
+                                    {lastSyncedAt !== null && syncStatus !== 'off' && (
+                                        <p className="text-xs text-[var(--color-m3-on-surface-variant)] dark:text-[var(--color-m3-dark-on-surface-variant)]">
+                                            {(t('sync.last_synced') as string).replace('{time}', new Date(lastSyncedAt).toLocaleTimeString())}
+                                        </p>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Disabled while locked. Without a key the reconcile
+                            behind this button cannot read the cloud copy and
+                            refuses to write over it, so every press was a spinner
+                            and the same dead-end alert. The row above is the
+                            thing to press instead. */}
                         <button
                             onClick={handleSave}
-                            disabled={savingCloud}
-                            className={`${rowBase} hover:bg-[var(--color-m3-surface-container)] dark:hover:bg-[var(--color-m3-dark-surface-container)] -mx-2 px-2 rounded disabled:opacity-50`}
+                            disabled={savingCloud || isLocked}
+                            className={`${rowBase} hover:bg-[var(--color-m3-surface-container)] dark:hover:bg-[var(--color-m3-dark-surface-container)] -mx-2 px-2 rounded disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent dark:disabled:hover:bg-transparent`}
                         >
                             {savingCloud
                                 ? <Loader2 className={`${iconCls} animate-spin`} size={18} />
@@ -787,6 +883,17 @@ const Account: React.FC<AccountProps> = ({
                 description={t('account.unlock_desc')}
                 error={unlockError}
                 loading={unlockLoading}
+                masked
+            />
+
+            <PasswordInputModal
+                isOpen={syncUnlockOpen}
+                onClose={() => { setSyncUnlockOpen(false); setSyncUnlockError(null); }}
+                onConfirm={handleSyncUnlockSubmit}
+                title={t('account.unlock_title')}
+                description={t('account.unlock_desc')}
+                error={syncUnlockError}
+                loading={syncUnlockLoading}
                 masked
             />
         </div>

@@ -14,7 +14,15 @@ async function setCloudKey(password: string, userId: string): Promise<void> {
     try {
         cacheCloudKey(await deriveCloudKey(password, userId));
     } catch {
-        // If derivation fails, fall back to no key (saves stay plaintext).
+        // Derivation only fails where there is no SubtleCrypto to do it with —
+        // a non-secure origin, i.e. a self-hosted deploy without TLS.
+        //
+        // Clearing the key rather than keeping a stale one is deliberate, and
+        // it no longer means what the comment here used to say ("saves stay
+        // plaintext"): prepareCloudPayload throws without a key and sync
+        // reports `locked`, so the account is unreachable rather than silently
+        // uploaded in the clear. Unreachable is the right end of that trade for
+        // health data, and the Account page says which state it is in.
         cacheCloudKey(null);
     }
 }
@@ -23,7 +31,16 @@ interface AuthContextType {
     user: User | null;
     token: string | null;
     login: (username: string, password: string, totpCode?: string, backupCode?: string) => Promise<void>;
-    loginWithToken: (data: AuthResponse) => void;
+    /**
+     * Finish a sign-in the server has already granted a token for.
+     *
+     * `verifiedPassword` is the account password *the server just accepted* —
+     * pass it only from the second step of a password sign-in, never from a
+     * password box the user typed into but never submitted. It is what the
+     * cloud key is derived from, so a wrong value would cache a key that
+     * opens nothing.
+     */
+    loginWithToken: (data: AuthResponse, verifiedPassword?: string) => Promise<void>;
     register: (username: string, password: string) => Promise<void>;
     logout: () => Promise<void>;
     isLoading: boolean;
@@ -89,7 +106,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
     };
 
-    const loginWithToken = (data: AuthResponse) => {
+    // Used by both passkey paths: a passkey *as the whole sign-in*, and a
+    // passkey used as the second factor after a password.
+    //
+    // The second of those used to land here with the password in hand and drop
+    // it, which is why an account with a passkey second factor ended up on a
+    // device that had never derived a cloud key: sync could then only report
+    // `locked`, and the manual backup button could only fail. Derive it here
+    // when the caller has a password the server accepted, so the passkey
+    // branch of a password sign-in ends up in the same state as the TOTP one.
+    //
+    // Passkey-only sign-in still has no password to derive from — nothing can
+    // change that — so it stays keyless until the user unlocks on the Account
+    // page.
+    const loginWithToken = async (data: AuthResponse, verifiedPassword?: string) => {
         setToken(data.token);
         setUser(data.user);
         localStorage.setItem('auth_token', data.token);
@@ -97,6 +127,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         // Passkey login always counts as completing 2FA
         setNeedsSetup2FA(false);
         localStorage.removeItem('needs_setup_2fa');
+        if (verifiedPassword) await setCloudKey(verifiedPassword, data.user.id);
     };
 
     const register = async (username: string, password: string) => {
