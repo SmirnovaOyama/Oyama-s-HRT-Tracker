@@ -930,7 +930,10 @@ export default {
     const sessionInvalid = (message: string) =>
       withSecurityHeaders(new Response(message, {
         status: 401,
-        headers: { ...corsHeaders, 'X-Session-Invalid': '1', 'Access-Control-Expose-Headers': 'X-Session-Invalid' },
+        // The expose-header list lives on corsHeaders now, and names Retry-After
+        // as well. Repeating a narrower one here would silently drop that from
+        // this response and leave two places deciding the same thing.
+        headers: { ...corsHeaders, 'X-Session-Invalid': '1' },
       }));
 
     try {
