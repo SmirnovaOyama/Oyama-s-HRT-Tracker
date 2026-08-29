@@ -12,16 +12,78 @@ function announceKeyChange(): void {
     try { window.dispatchEvent(new Event(CLOUD_KEY_CHANGED_EVENT)); } catch { /* non-DOM host */ }
 }
 
+/**
+ * Where the derived key lives. One slot, holding the key *and* the account it
+ * belongs to.
+ *
+ * It used to hold the key alone, which made "this device has a key" and "this
+ * device has a key for the account currently signed in" the same question. They
+ * are not: every write path derives from the signed-in user's id, but nothing
+ * in the read path checked whose key came back, so the invariant rested
+ * entirely on sign-out having cleared it first. Recording the owner makes the
+ * check local instead of a chain of reasoning about other code.
+ */
+const KEY_SLOT = 'enc_key';
+
+interface StoredCloudKey {
+    /** Account id the key was derived for. */
+    u: string;
+    /** Raw AES key bytes, base64. */
+    k: string;
+}
+
+function readSlot(): StoredCloudKey | null {
+    const raw = localStorage.getItem(KEY_SLOT);
+    if (!raw) return null;
+    try {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed.u === 'string' && typeof parsed.k === 'string') {
+            return parsed as StoredCloudKey;
+        }
+    } catch { /* not the envelope — see below */ }
+    return null;
+}
+
+/**
+ * The key this device holds for `userId`, or null.
+ *
+ * A slot written by an older build holds the bare key with no owner. Only one
+ * account can be signed in at a time and signing out clears the slot, so
+ * whoever is asking is the account it was derived for: adopt it rather than
+ * making every existing user re-enter their password on the next release.
+ */
+function readCloudKey(userId: string): string | null {
+    const stored = readSlot();
+    if (stored) return stored.u === userId ? stored.k : null;
+
+    const legacy = localStorage.getItem(KEY_SLOT);
+    if (!legacy) return null;
+    localStorage.setItem(KEY_SLOT, JSON.stringify({ u: userId, k: legacy }));
+    return legacy;
+}
+
 /** Cache a derived cloud key on this device and wake anything waiting on one. */
-export function cacheCloudKey(rawKeyB64: string | null): void {
-    if (rawKeyB64) localStorage.setItem('enc_key', rawKeyB64);
-    else localStorage.removeItem('enc_key');
+export function cacheCloudKey(userId: string, rawKeyB64: string | null): void {
+    if (rawKeyB64) localStorage.setItem(KEY_SLOT, JSON.stringify({ u: userId, k: rawKeyB64 }));
+    else localStorage.removeItem(KEY_SLOT);
     announceKeyChange();
 }
 
-/** Whether this device holds a key at all — distinct from holding the right one. */
-export function hasCloudKey(): boolean {
-    return !!localStorage.getItem('enc_key');
+/**
+ * Drop whatever key is held, whoever it belongs to. Sign-out, and the forced
+ * sign-out a dead session triggers.
+ */
+export function clearCloudKey(): void {
+    localStorage.removeItem(KEY_SLOT);
+    announceKeyChange();
+}
+
+/**
+ * Whether this device holds a key for this account — distinct from holding the
+ * right one, which only trying it against real ciphertext can answer.
+ */
+export function hasCloudKey(userId: string): boolean {
+    return readCloudKey(userId) !== null;
 }
 
 /**
@@ -35,8 +97,8 @@ export function hasCloudKey(): boolean {
  * refuses to act without a key (`locked`); the write path has to fail the same
  * way. Callers gate on `hasCloudKey()` and surface `locked` instead.
  */
-export async function prepareCloudPayload(exportData: any): Promise<any> {
-    const key = localStorage.getItem('enc_key');
+export async function prepareCloudPayload(exportData: any, userId: string): Promise<any> {
+    const key = readCloudKey(userId);
     if (!key) throw new Error('CLOUD_KEY_MISSING');
     return await encryptCloudPayload(JSON.stringify(exportData), key);
 }
@@ -68,12 +130,12 @@ function toEnvelope(rawData: string | unknown): any | undefined {
 }
 
 /** Read a stored cloud backup, decrypting with the cached device key if needed. */
-export async function readCloudBackup(rawData: string | unknown): Promise<CloudBackupResult> {
+export async function readCloudBackup(rawData: string | unknown, userId: string): Promise<CloudBackupResult> {
     const parsed = toEnvelope(rawData);
     if (parsed === undefined) return { status: 'corrupt' };
     if (!isCloudEncrypted(parsed)) return { status: 'ok', data: parsed };
 
-    const key = localStorage.getItem('enc_key');
+    const key = readCloudKey(userId);
     if (key) {
         const plain = await decryptCloudPayload(parsed, key);
         if (plain !== null) {
@@ -107,8 +169,7 @@ export async function unlockCloudBackup(
     const plain = await decryptCloudPayload(parsed, candidate);
     if (plain === null) return { status: 'locked' };
 
-    localStorage.setItem('enc_key', candidate);
-    announceKeyChange();
+    cacheCloudKey(userId, candidate);
     try { return { status: 'ok', data: JSON.parse(plain) }; }
     catch { return { status: 'corrupt' }; }
 }
@@ -136,16 +197,19 @@ export type CloudKeyResult =
  * password cannot leave the device encrypting under a key nothing else in the
  * account shares.
  *
- * With one exception, which is the reason `revisions` has to be exhaustive:
- * when the account holds no ciphertext at all, there is nothing to check
- * against and the key is cached unverified. Refusing instead would be a dead
- * end — the status this unlocks is reachable with an empty cloud, since it
- * turns on this device holding no key rather than on what is stored — and a
- * wrong key orphans nothing when there is nothing up there to orphan. What it
- * can still do is leave two devices writing under different keys until one of
- * them signs in with a password again; neither loses records, because each
- * keeps its own copy locally and the mismatch resolves the way a password
- * change already does, by superseding the copy that cannot be read.
+ * When the account holds no ciphertext at all — the status this unlocks turns
+ * on this device holding no key, not on what is stored, so an empty cloud
+ * reaches it — there is nothing here to check against and `confirmPassword`
+ * decides. That is the account password endpoint, which is the only other
+ * thing that knows. Refusing outright would be a dead end, and accepting
+ * blindly was worse than it looked: it is precisely the account with nothing
+ * encrypted yet whose *first* backup would be written under a typo'd key that
+ * no other device could ever open.
+ *
+ * `confirmPassword` may throw — it is a network call — and the throw is passed
+ * through rather than swallowed into "wrong password", so the caller can tell
+ * "we could not ask" from "we asked and it is wrong". Nothing is cached on
+ * either.
  *
  * This is the way back from `locked` for a device that signed in with a passkey
  * alone: no password was ever seen, so no key could be derived at sign-in.
@@ -154,6 +218,7 @@ export async function establishCloudKey(
     password: string,
     userId: string,
     revisions: AsyncIterable<string | unknown> | Iterable<string | unknown>,
+    confirmPassword: (password: string) => Promise<boolean>,
 ): Promise<CloudKeyResult> {
     let candidate: string;
     try { candidate = await deriveCloudKey(password, userId); }
@@ -168,21 +233,21 @@ export async function establishCloudKey(
         if (parsed === undefined || !isCloudEncrypted(parsed)) continue;
         sawEncrypted = true;
         if (await decryptCloudPayload(parsed, candidate) !== null) {
-            cacheCloudKey(candidate);
+            cacheCloudKey(userId, candidate);
             return 'unlocked';
         }
     }
 
+    // Ciphertext that this password does not open. The server cannot help
+    // here and asking it would give the wrong answer: backups written under a
+    // previous password are opened by that password, not the current one.
     if (sawEncrypted) return 'wrong-password';
-    cacheCloudKey(candidate);
+
+    if (!(await confirmPassword(password))) return 'wrong-password';
+    cacheCloudKey(userId, candidate);
     return 'unlocked';
 }
 
-/** Parse a stored cloud backup string/object, decrypting when needed. */
-export async function parseCloudBackup(rawData: string | unknown): Promise<any | null> {
-    const res = await readCloudBackup(rawData);
-    return res.status === 'ok' ? res.data : null;
-}
 
 /** Flatten v1/v2 backup payloads into counts usable by the account UI. */
 export function normalizeBackupPayload(parsed: any): BackupSummary {

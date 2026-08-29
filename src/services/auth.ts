@@ -282,6 +282,36 @@ export const authService = {
         return await res.json() as Passkey[];
     },
 
+    /**
+     * Ask whether this is the account password, without doing anything on the
+     * strength of the answer.
+     *
+     * The one caller is the cloud-backup unlock: an account with nothing
+     * encrypted in the cloud has no ciphertext to try the password against, and
+     * a wrong one adopted there would encrypt every later backup under a key no
+     * other device can open. Rejections other than 401 are rethrown so the
+     * caller can tell "wrong password" from "could not ask".
+     */
+    async verifyPassword(token: string, password: string): Promise<boolean> {
+        const res = await apiFetch('/api/user/verify-password', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+            body: JSON.stringify({ password }),
+        });
+        // Two different 401s arrive here. Only the untagged one means the
+        // password was wrong; the tagged one means the session died, and
+        // apiFetch has already started signing the user out over it. Reporting
+        // that as a wrong password would accuse them of mistyping while a
+        // "session expired" dialog opened behind the prompt.
+        if (res.status === 401 && res.headers.get('X-Session-Invalid') !== '1') return false;
+        if (!res.ok) {
+            const err = new Error(await res.text()) as Error & { status?: number };
+            err.status = res.status;
+            throw err;
+        }
+        return true;
+    },
+
     async registerPasskeyOptions(token: string): Promise<any> {
         const res = await apiFetch('/api/user/passkey/register-options', {
             method: 'POST',

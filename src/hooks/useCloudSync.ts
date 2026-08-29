@@ -35,7 +35,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { cloudService } from '../services/cloud';
+import { cloudService, CloudRequestError } from '../services/cloud';
 import { CLOUD_KEY_CHANGED_EVENT, hasCloudKey, prepareCloudPayload, readCloudBackup } from '../utils/cloudBackup';
 import { fingerprintState, hasContent, mergeSyncStates, normalizeSyncState, SyncState } from '../utils/syncMerge';
 
@@ -62,11 +62,18 @@ export type SyncStatus =
  * could never work.
  */
 export type SyncOutcome =
+    /** Reconciled, and this device's data was written up. */
     | 'synced'
+    /** Reconciled, and the cloud already held it — nothing was written. */
+    | 'already-current'
     /** No key here: nothing was read, nothing was written. Unlock first. */
     | 'locked'
     /** A reconcile was already in flight; it has been asked to run again. */
     | 'busy'
+    /** The endpoint is throttling this account; the next trigger will get through. */
+    | 'rate-limited'
+    /** The payload is past the endpoint's size cap. Retrying cannot help. */
+    | 'too-large'
     | 'error';
 
 export interface CloudSyncState {
@@ -120,6 +127,21 @@ const MAX_BACKUP_PROBES = 3;
  */
 const byNewest = <T extends { created_at: number }>(metas: T[]): T[] =>
     [...metas].sort((a, b) => b.created_at - a.created_at);
+
+/**
+ * What a thrown cloud request means for the caller.
+ *
+ * The endpoint answers 429 when an account has written twenty times in a
+ * minute, and 413 when a payload is past the 2 MiB cap. One of those clears on
+ * its own and the other never will, and both used to arrive as the same
+ * unexplained failure.
+ */
+const classify = (e: unknown): SyncOutcome => {
+    const status = e instanceof CloudRequestError ? e.status : 0;
+    if (status === 429) return 'rate-limited';
+    if (status === 413) return 'too-large';
+    return 'error';
+};
 
 /** Id of the newest revision, whether or not it turned out to be readable. */
 const newestBackupId = (metas: { id: string }[]): string | null =>
@@ -238,6 +260,7 @@ export const useCloudSync = ({
     /** Fetch the newest backup we can actually read, plus what the newest *is*. */
     const readRemote = useCallback(async (
         authToken: string,
+        account: string,
     ): Promise<{ read: RemoteRead; newestId: string | null }> => {
         const metas = await cloudService.listMeta(authToken);
         if (!metas || metas.length === 0) return { read: { kind: 'empty' }, newestId: null };
@@ -247,7 +270,7 @@ export const useCloudSync = ({
         let sawLocked = false;
         for (const meta of ordered.slice(0, MAX_BACKUP_PROBES)) {
             const backup = await cloudService.loadOne(authToken, meta.id);
-            const read = await readCloudBackup(backup.data);
+            const read = await readCloudBackup(backup.data, account);
             if (read.status === 'ok') {
                 return { read: { kind: 'state', state: normalizeSyncState(read.data) }, newestId };
             }
@@ -257,7 +280,7 @@ export const useCloudSync = ({
             // and overwriting readable history.
         }
         if (!sawLocked) return { read: { kind: 'unreadable' }, newestId };
-        return { read: hasCloudKey() ? { kind: 'orphaned' } : { kind: 'locked' }, newestId };
+        return { read: hasCloudKey(account) ? { kind: 'orphaned' } : { kind: 'locked' }, newestId };
     }, []);
 
     /**
@@ -283,7 +306,7 @@ export const useCloudSync = ({
         setState(prev => ({ ...prev, status: 'syncing' }));
 
         try {
-            const { read: remote, newestId } = await readRemote(authToken);
+            const { read: remote, newestId } = await readRemote(authToken, account);
             if (!stillCurrent(account, authToken, force)) return 'error';
 
             // `locked` covers a cloud copy this device cannot read. The
@@ -293,7 +316,7 @@ export const useCloudSync = ({
             // meant sending the record in the clear, and because an account with
             // an empty cloud reports `empty` rather than `locked`, that path fell
             // straight through to a push and still called itself 'synced'.
-            if (remote.kind === 'locked' || !hasCloudKey()) {
+            if (remote.kind === 'locked' || !hasCloudKey(account)) {
                 lockedRef.current = true;
                 setState(prev => ({ ...prev, status: 'locked' }));
                 return 'locked';
@@ -315,15 +338,17 @@ export const useCloudSync = ({
                 // they would take turns re-uploading on every poll.
                 const fingerprint = fingerprintState(local);
                 lastSeenBackupRef.current = newestId;
+                let wrote = false;
                 if (hasContent(local) && fingerprint !== lastPushedRef.current) {
-                    const savedId = await cloudService.save(authToken, await prepareCloudPayload(localPayload));
+                    const savedId = await cloudService.save(authToken, await prepareCloudPayload(localPayload, account));
                     if (!stillCurrent(account, authToken, force)) return 'error';
                     lastPushedRef.current = fingerprint;
                     lastSeenBackupRef.current = savedId;
+                    wrote = true;
                 }
                 bootstrappedForRef.current = account;
                 setState(prev => ({ ...prev, status: 'synced', lastSyncedAt: Date.now() }));
-                return 'synced';
+                return wrote ? 'synced' : 'already-current';
             }
 
             const result = mergeSyncStates(local, remote.kind === 'state' ? remote.state : null);
@@ -339,17 +364,20 @@ export const useCloudSync = ({
                 const outgoing = result.localChanged
                     ? toPayload(localPayload, result.merged)
                     : localPayload;
-                const savedId = await cloudService.save(authToken, await prepareCloudPayload(outgoing));
+                const savedId = await cloudService.save(authToken, await prepareCloudPayload(outgoing, account));
                 if (!stillCurrent(account, authToken, force)) return 'error';
                 lastSeenBackupRef.current = savedId;
             }
             lastPushedRef.current = mergedFingerprint;
             bootstrappedForRef.current = account;
             setState(prev => ({ ...prev, status: 'synced', lastSyncedAt: Date.now() }));
-            return 'synced';
-        } catch {
+            // "Saved to cloud" for a reconcile that wrote nothing left the user
+            // looking at a backup list whose newest entry had not moved, which
+            // is indistinguishable from a silent failure.
+            return result.remoteStale ? 'synced' : 'already-current';
+        } catch (e) {
             setState(prev => ({ ...prev, status: 'error' }));
-            return 'error';
+            return classify(e);
         } finally {
             runningRef.current = false;
             // `readyRef` is checked here as well as inside runSync, because the
@@ -369,10 +397,10 @@ export const useCloudSync = ({
     const runPush = useCallback(async (): Promise<void> => {
         // A debounced push can fire without a preceding reconcile, so it needs
         // its own key check — see the fail-closed note in runSync.
-        if (!activeRef.current || lockedRef.current || !hasCloudKey()) return;
         const authToken = tokenRef.current;
         const account = userIdRef.current;
-        if (!authToken || !account) return;
+        if (!activeRef.current || lockedRef.current || !authToken || !account) return;
+        if (!hasCloudKey(account)) return;
 
         // Nothing has looked at the cloud for this account yet. Reconcile first
         // — pushing blind is how a fresh sign-in overwrites everything.
@@ -403,7 +431,7 @@ export const useCloudSync = ({
                 return;
             }
 
-            const savedId = await cloudService.save(authToken, await prepareCloudPayload(payload));
+            const savedId = await cloudService.save(authToken, await prepareCloudPayload(payload, account));
             if (!stillCurrent(account, authToken)) return;
             lastPushedRef.current = fingerprint;
             lastSeenBackupRef.current = savedId;
@@ -483,7 +511,7 @@ export const useCloudSync = ({
     useEffect(() => {
         if (!token || !userId) return;
         const onKeyChange = () => {
-            if (!hasCloudKey()) return;
+            if (!userId || !hasCloudKey(userId)) return;
             lockedRef.current = false;
             if (activeRef.current) { void runSync(); return; }
             setState(prev => prev.status === 'locked'

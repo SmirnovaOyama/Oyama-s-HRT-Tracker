@@ -897,6 +897,12 @@ export default {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, HEAD, POST, DELETE, OPTIONS, PATCH, PUT',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      // Without this a VITE_API_ORIGIN build cannot read either header off a
+      // cross-origin response: the browser hides everything but the CORS-safe
+      // list. Retry-After is what tells a rate-limited client how long to wait,
+      // and X-Session-Invalid is what separates an expired session from a
+      // wrong password.
+      'Access-Control-Expose-Headers': 'Retry-After, X-Session-Invalid',
     };
 
     const shareJson = (body: unknown, status = 200, extraHeaders: Record<string, string> = {}) =>
@@ -1711,10 +1717,10 @@ export default {
             const metaOnly = url.searchParams.get('meta') === '1';
             if (metaOnly) {
               const content = await env.DB.prepare('SELECT id, created_at, LENGTH(data) AS data_size FROM content WHERE user_id = ? ORDER BY created_at DESC').bind(userId).all();
-              return withSecurityHeaders(new Response(JSON.stringify(content.results), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }));
+              return shareJson(content.results);
             }
             const content = await env.DB.prepare('SELECT * FROM content WHERE user_id = ? ORDER BY created_at DESC').bind(userId).all();
-            return withSecurityHeaders(new Response(JSON.stringify(content.results), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }));
+            return shareJson(content.results);
           }
           if (url.pathname === '/api/content' && request.method === 'POST') {
             // Same guard the share endpoints already apply. Without it this
@@ -1722,12 +1728,12 @@ export default {
             // isolate's memory ceiling, with no rate limit on the path either.
             if (!(await checkRateLimit(env, `content-write:${userId}`, 20, 60000))) {
               return withSecurityHeaders(new Response('Too many backups. Please try again later.', {
-                status: 429, headers: { ...corsHeaders, 'Retry-After': '60' },
+                status: 429, headers: { ...corsHeaders, 'Retry-After': '60', 'Cache-Control': 'no-store' },
               }));
             }
             const declaredLength = Number(request.headers.get('Content-Length'));
             if (Number.isFinite(declaredLength) && declaredLength > MAX_SHARE_REQUEST_BYTES) {
-              return withSecurityHeaders(new Response('Backup exceeds the 2 MiB limit', { status: 413, headers: corsHeaders }));
+              return withSecurityHeaders(new Response('Backup exceeds the 2 MiB limit', { status: 413, headers: { ...corsHeaders, 'Cache-Control': 'no-store' } }));
             }
             const rawBody = await request.text();
             if (new TextEncoder().encode(rawBody).byteLength > MAX_SHARE_REQUEST_BYTES) {
@@ -1756,20 +1762,26 @@ export default {
                 `DELETE FROM content WHERE id IN (${ids.map(() => '?').join(',')})`
               ).bind(...ids).run();
             }
-            return withSecurityHeaders(new Response(JSON.stringify({ message: 'Content saved', id }), { status: 201, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }));
+            return shareJson({ message: 'Content saved', id }, 201);
           }
           // Delete a specific backup (user can only delete their own)
           if (url.pathname.match(/^\/api\/content\/[^/]+$/) && request.method === 'DELETE') {
             const backupId = url.pathname.split('/').pop();
-            await env.DB.prepare('DELETE FROM content WHERE id = ? AND user_id = ?').bind(backupId, userId).run();
-            return withSecurityHeaders(new Response(JSON.stringify({ message: 'Backup deleted' }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }));
+            const removed = await env.DB.prepare('DELETE FROM content WHERE id = ? AND user_id = ?').bind(backupId, userId).run();
+            // Report what actually happened. Answering "deleted" for an id this
+            // account never held let the UI drop the row from its list on the
+            // strength of a request that changed nothing.
+            if (!removed.meta?.changes) {
+              return withSecurityHeaders(new Response('Not found', { status: 404, headers: { ...corsHeaders, 'Cache-Control': 'no-store' } }));
+            }
+            return shareJson({ message: 'Backup deleted' });
           }
           // Load a specific backup by ID
           if (url.pathname.match(/^\/api\/content\/[^/]+$/) && request.method === 'GET') {
             const backupId = url.pathname.split('/').pop();
             const row = await env.DB.prepare('SELECT * FROM content WHERE id = ? AND user_id = ?').bind(backupId, userId).first();
-            if (!row) return withSecurityHeaders(new Response('Not found', { status: 404, headers: corsHeaders }));
-            return withSecurityHeaders(new Response(JSON.stringify(row), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }));
+            if (!row) return withSecurityHeaders(new Response('Not found', { status: 404, headers: { ...corsHeaders, 'Cache-Control': 'no-store' } }));
+            return shareJson(row);
           }
         }
 
@@ -2317,6 +2329,43 @@ export default {
             const codes = await generateAndStoreBackupCodes(env, userId, jwtSecret);
             return withSecurityHeaders(new Response(JSON.stringify({ codes }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }));
           }
+        }
+
+        // POST /api/user/verify-password — is this the account password?
+        //
+        // Answers nothing the caller could not already learn by trying the
+        // password on any of the endpoints gated by it (re-enrolling a passkey,
+        // regenerating backup codes, deleting the account) — but those all do
+        // something on success, so none of them can be used just to ask. This
+        // one has no side effect either way.
+        //
+        // The client needs it for exactly one case: adopting a cloud-backup key
+        // for an account that holds no ciphertext to check the password
+        // against. Without it a typo there is accepted silently and every later
+        // backup is written under a key no other device can open.
+        //
+        // A live session is already required to reach here, so this is a
+        // confirmation, not an authentication. The rate limit is what stops a
+        // borrowed session from becoming an offline-speed password oracle.
+        if (url.pathname === '/api/user/verify-password' && request.method === 'POST') {
+          if (!(await checkRateLimit(env, `verify-password:${userId}`, 10, 60000))) {
+            return withSecurityHeaders(new Response('Too many attempts. Please try again later.', {
+              status: 429, headers: { ...corsHeaders, 'Retry-After': '60', 'Cache-Control': 'no-store' },
+            }));
+          }
+          const { password } = await request.json().catch(() => ({})) as any;
+          if (!password || typeof password !== 'string') {
+            return withSecurityHeaders(new Response('Password is required', { status: 400, headers: { ...corsHeaders, 'Cache-Control': 'no-store' } }));
+          }
+          const row = await env.DB.prepare('SELECT password_hash FROM users WHERE id = ?').bind(userId).first() as any;
+          // Compare even when the row is missing, so a deleted account costs
+          // the same time as a wrong password.
+          const dummyHash = '$2a$10$CCCCCCCCCCCCCCCCCCCCC.O0D3I6./CCCCCCCCCCCCCCCCCCCCCCC';
+          const valid = await bcrypt.compare(password, row?.password_hash ?? dummyHash);
+          if (!row || !valid) {
+            return withSecurityHeaders(new Response('Incorrect password', { status: 401, headers: { ...corsHeaders, 'Cache-Control': 'no-store' } }));
+          }
+          return shareJson({ valid: true });
         }
 
         // --- Passkeys (WebAuthn) ---

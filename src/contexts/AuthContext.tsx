@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { authService, User, AuthResponse, sessionIdFromToken } from '../services/auth';
 import { deriveCloudKey } from '../../logic';
-import { cacheCloudKey } from '../utils/cloudBackup';
+import { cacheCloudKey, clearCloudKey } from '../utils/cloudBackup';
 import { UNAUTHORIZED_EVENT } from '../services/apiClient';
 import { useDialog } from './DialogContext';
 import { useTranslation } from './LanguageContext';
@@ -12,7 +12,7 @@ import { useTranslation } from './LanguageContext';
 // data but cannot be used to authenticate.
 async function setCloudKey(password: string, userId: string): Promise<void> {
     try {
-        cacheCloudKey(await deriveCloudKey(password, userId));
+        cacheCloudKey(userId, await deriveCloudKey(password, userId));
     } catch {
         // Derivation only fails where there is no SubtleCrypto to do it with —
         // a non-secure origin, i.e. a self-hosted deploy without TLS.
@@ -23,7 +23,7 @@ async function setCloudKey(password: string, userId: string): Promise<void> {
         // reports `locked`, so the account is unreachable rather than silently
         // uploaded in the clear. Unreachable is the right end of that trade for
         // health data, and the Account page says which state it is in.
-        cacheCloudKey(null);
+        clearCloudKey();
     }
 }
 
@@ -157,7 +157,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         localStorage.removeItem('auth_token');
         localStorage.removeItem('auth_user');
         localStorage.removeItem('needs_setup_2fa');
-        cacheCloudKey(null);
+        clearCloudKey();
     };
 
     const logout = async () => {

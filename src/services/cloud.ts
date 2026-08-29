@@ -13,6 +13,21 @@ export interface BackupMeta {
     data_size: number;
 }
 
+/**
+ * A failed cloud request, carrying the status so callers can tell the cases
+ * apart. Every rejection used to be a bare Error, so a 429 (slow down, this
+ * will work shortly), a 413 (this will never fit) and a dropped connection all
+ * reached the user as one unexplained "failed to save to cloud".
+ */
+export class CloudRequestError extends Error {
+    readonly status: number;
+    constructor(message: string, status: number) {
+        super(message);
+        this.name = 'CloudRequestError';
+        this.status = status;
+    }
+}
+
 export const cloudService = {
     /**
      * Store a new backup revision. Returns its id, which sync uses to recognise
@@ -29,7 +44,7 @@ export const cloudService = {
             },
             body: JSON.stringify({ data })
         });
-        if (!res.ok) throw new Error('Failed to save');
+        if (!res.ok) throw new CloudRequestError('Failed to save', res.status);
         try {
             const body = await res.json() as { id?: string };
             return typeof body?.id === 'string' ? body.id : null;
@@ -45,7 +60,7 @@ export const cloudService = {
         const res = await apiFetch('/api/content?meta=1', {
             headers: { 'Authorization': `Bearer ${token}` }
         });
-        if (!res.ok) throw new Error('Failed to list backups');
+        if (!res.ok) throw new CloudRequestError('Failed to list backups', res.status);
         return await res.json() as BackupMeta[];
     },
 
@@ -53,7 +68,7 @@ export const cloudService = {
         const res = await apiFetch(`/api/content/${encodeURIComponent(backupId)}`, {
             headers: { 'Authorization': `Bearer ${token}` }
         });
-        if (!res.ok) throw new Error('Failed to load backup');
+        if (!res.ok) throw new CloudRequestError('Failed to load backup', res.status);
         return await res.json() as CloudBackup;
     },
 
@@ -62,6 +77,6 @@ export const cloudService = {
             method: 'DELETE',
             headers: { 'Authorization': `Bearer ${token}` }
         });
-        if (!res.ok) throw new Error('Failed to delete backup');
+        if (!res.ok) throw new CloudRequestError('Failed to delete backup', res.status);
     }
 };

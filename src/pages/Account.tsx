@@ -4,7 +4,7 @@ import ShieldIcon from '../components/ShieldIcon';
 import { SettingsListItem } from '../components/SettingsListItem';
 
 import { useAuth } from '../contexts/AuthContext';
-import { cloudService, BackupMeta } from '../services/cloud';
+import { cloudService, BackupMeta, CloudRequestError } from '../services/cloud';
 import { readCloudBackup, unlockCloudBackup, normalizeBackupPayload, establishCloudKey } from '../utils/cloudBackup';
 import { useDialog } from '../contexts/DialogContext';
 import { authService, serializeAssertionCredential, b64url2ab } from '../services/auth';
@@ -144,11 +144,22 @@ const Account: React.FC<AccountProps> = ({
     const handleDeleteBackup = async (id: string) => {
         if (!token) return;
         showDialog('confirm', t('account.delete_backup_confirm'), async () => {
-            try {
-                await cloudService.deleteBackup(token, id);
+            const forget = () => {
                 setBackupList(prev => prev.filter(b => b.id !== id));
                 setExpandedData(prev => { const n = { ...prev }; delete n[id]; return n; });
-            } catch { showDialog('alert', t('account.delete_backup_failed')); }
+            };
+            try {
+                await cloudService.deleteBackup(token, id);
+                forget();
+            } catch (e) {
+                // The endpoint now answers 404 rather than a cheerful 200 when
+                // it removed nothing, which is what a row that another device
+                // already deleted looks like. The user asked for it gone and it
+                // is gone — drop the row instead of reporting a failure and
+                // leaving a revision on screen that no longer exists.
+                if (e instanceof CloudRequestError && e.status === 404) { forget(); return; }
+                showDialog('alert', t('account.delete_backup_failed'));
+            }
         });
     };
 
@@ -165,7 +176,7 @@ const Account: React.FC<AccountProps> = ({
         setExpandLoading(b.id);
         try {
             const backup = await cloudService.loadOne(token!, b.id);
-            const res = await readCloudBackup(backup.data);
+            const res = await readCloudBackup(backup.data, user.id);
             if (res.status === 'ok') {
                 setExpandedData(prev => ({ ...prev, [b.id]: normalizeBackupPayload(res.data) }));
             } else if (res.status === 'locked') {
@@ -238,15 +249,22 @@ const Account: React.FC<AccountProps> = ({
                 }
             }
 
-            const result = await establishCloudKey(password, user.id, bodies());
+            const result = await establishCloudKey(
+                password, user.id, bodies(),
+                // Only consulted when the account holds no ciphertext to check
+                // against, which is the one case the password cannot be tested
+                // locally. See establishCloudKey.
+                pw => authService.verifyPassword(token, pw),
+            );
             if (result === 'unlocked') {
                 // Caching the key announces itself; sync picks it up from there.
                 setSyncUnlockOpen(false);
                 return;
             }
             setSyncUnlockError(t(result === 'wrong-password' ? 'account.unlock_failed' : 'error.generic'));
-        } catch {
-            setSyncUnlockError(t('error.generic'));
+        } catch (e) {
+            const status = (e as { status?: number } | null)?.status;
+            setSyncUnlockError(t(status === 429 ? 'account.cloud_rate_limited' : 'error.generic'));
         } finally {
             setSyncUnlockLoading(false);
         }

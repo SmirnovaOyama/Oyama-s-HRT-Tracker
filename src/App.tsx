@@ -6,7 +6,7 @@ import { PixelCatProvider } from './contexts/PixelCatContext';
 import ErrorBoundary from './components/ErrorBoundary';
 import { APP_VERSION, AppTheme } from './constants';
 import { DoseEvent, decompressData, encryptData, decryptData } from '../logic';
-import { parseCloudBackup } from './utils/cloudBackup';
+import { readCloudBackup, CloudBackupResult } from './utils/cloudBackup';
 import { useAppData } from './hooks/useAppData';
 import { useAppNavigation, ViewKey } from './hooks/useAppNavigation';
 import { useLiveShareSync } from './hooks/useLiveShareSync';
@@ -20,7 +20,7 @@ import PasswordInputModal from './components/PasswordInputModal';
 import DisclaimerModal from './components/DisclaimerModal';
 import AuthModal from './components/AuthModal';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
-import { cloudService } from './services/cloud';
+import { cloudService, CloudRequestError } from './services/cloud';
 
 // Pages
 import Home from './pages/Home';
@@ -54,8 +54,11 @@ import SiteNoticeBanner from './components/SiteNotice';
 /** What the manual backup button reports back, per reconcile outcome. */
 const CLOUD_SAVE_MESSAGE: Record<SyncOutcome, string> = {
     synced: 'account.cloud_save_success',
+    'already-current': 'account.cloud_already_current',
     locked: 'account.cloud_save_locked',
     busy: 'account.cloud_save_busy',
+    'rate-limited': 'account.cloud_rate_limited',
+    'too-large': 'account.cloud_save_too_large',
     error: 'account.cloud_save_failed',
 };
 
@@ -341,14 +344,26 @@ const AppContent = () => {
         showDialog('alert', t(CLOUD_SAVE_MESSAGE[outcome]));
     };
 
+    // Restore and merge both read one revision back, and both used to flatten
+    // every way that can go wrong — encrypted with no key here, a body that
+    // isn't JSON, 404, 429, offline — into one "failed to load from cloud".
+    // The encrypted case is the one worth separating: it is not a failure to
+    // retry, it is the unlock the Account page's sync row now offers.
+    const cloudReadFailure = (parsed: CloudBackupResult, fallbackKey: string): string =>
+        parsed.status === 'locked' ? 'account.cloud_locked' : fallbackKey;
+
+    /** Throttling is the one transport failure worth naming: it passes. */
+    const cloudRequestFailure = (e: unknown, fallbackKey: string): string =>
+        e instanceof CloudRequestError && e.status === 429 ? 'account.cloud_rate_limited' : fallbackKey;
+
     const handleCloudLoad = async (backupId?: string) => {
-        if (!token) { setIsAuthModalOpen(true); return; }
+        if (!token || !user) { setIsAuthModalOpen(true); return; }
         try {
-            let parsed: any;
+            let read: CloudBackupResult;
             let timestamp: number;
             if (backupId) {
                 const backup = await cloudService.loadOne(token, backupId);
-                parsed = await parseCloudBackup(backup.data);
+                read = await readCloudBackup(backup.data, user.id);
                 timestamp = backup.created_at;
             } else {
                 // Metadata first, then fetch only the newest body — the same
@@ -361,33 +376,34 @@ const AppContent = () => {
                 }
                 const newest = metas.reduce((a, b) => (b.created_at > a.created_at ? b : a));
                 const latest = await cloudService.loadOne(token, newest.id);
-                parsed = await parseCloudBackup(latest.data);
+                read = await readCloudBackup(latest.data, user.id);
                 timestamp = latest.created_at;
             }
-            if (!parsed) {
-                showDialog('alert', t('account.cloud_load_failed'));
+            if (read.status !== 'ok') {
+                showDialog('alert', t(cloudReadFailure(read, 'account.cloud_load_failed')));
                 return;
             }
+            const parsed = read.data;
             showDialog('confirm', (t('account.load_confirm') as string).replace('{time}', new Date(timestamp * 1000).toLocaleString()), () => {
                 processImportedData(parsed);
             });
         } catch (e) {
-            showDialog('alert', t('account.cloud_load_failed'));
+            showDialog('alert', t(cloudRequestFailure(e, 'account.cloud_load_failed')));
         }
     };
 
     const handleCloudMerge = async (backupId: string) => {
-        if (!token) { setIsAuthModalOpen(true); return; }
+        if (!token || !user) { setIsAuthModalOpen(true); return; }
         try {
             const backup = await cloudService.loadOne(token, backupId);
-            const parsed = await parseCloudBackup(backup.data);
-            if (!parsed) {
-                showDialog('alert', t('account.merge_cloud_failed'));
+            const read = await readCloudBackup(backup.data, user.id);
+            if (read.status !== 'ok') {
+                showDialog('alert', t(cloudReadFailure(read, 'account.merge_cloud_failed')));
                 return;
             }
-            mergeImportedData(parsed);
+            mergeImportedData(read.data);
         } catch (e) {
-            showDialog('alert', t('account.merge_cloud_failed'));
+            showDialog('alert', t(cloudRequestFailure(e, 'account.merge_cloud_failed')));
         }
     };
 
